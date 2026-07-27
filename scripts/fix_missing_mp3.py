@@ -29,7 +29,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mkv", ".avi")
 INSTRUMENTAL_NAME = "instrumental.ogg"
-TAG_ENCODINGS = ("utf-8", "cp1252")
+# utf-8-sig decodes UTF-8 with or without a leading BOM and drops it. Charts
+# are always written back as plain UTF-8, so a BOM never survives an edit.
+TAG_ENCODINGS = ("utf-8-sig", "cp1252")
 
 
 def find_case_insensitive(directory: Path, name: str) -> Path | None:
@@ -51,9 +53,12 @@ def read_text_preserving_encoding(path: Path) -> tuple[str, str]:
     raw = path.read_bytes()
     for encoding in TAG_ENCODINGS:
         try:
-            return raw.decode(encoding), encoding
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
             continue
+        # A stray BOM anywhere breaks header parsing (it is not whitespace,
+        # so a line starting with one never looks like a #TAG line).
+        return text.replace("﻿", ""), "utf-8" if encoding == "utf-8-sig" else encoding
     return raw.decode("utf-8", errors="replace"), "utf-8"
 
 

@@ -52,7 +52,24 @@ These files are consumed by UltraStar-family game clients (UltraStar Deluxe, Voc
 
 ## Scripts
 
-Requires [`uv`](https://docs.astral.sh/uv/).
+Requires [`uv`](https://docs.astral.sh/uv/), plus `ffprobe` (ffmpeg) on PATH for the audio-length checks.
+
+Every script defaults to a **dry run** and needs `--write` to change anything.
+
+### The one to reach for
+
+- **`scripts/fix_my_library.py`** — runs every routine remediation in the order the individual scripts need, then reports what still wants a human.
+
+  ```bash
+  uv run scripts/fix_my_library.py            # preview everything
+  uv run scripts/fix_my_library.py --write    # apply everything
+  ```
+
+  The sequence is `strip_bom` → `tag_split_audio` → `resolve_duplicate_songs` → `tag_split_audio` again → `fix_missing_mp3` → `find_missing_video`. BOMs go first because one makes a header line invisible to every other tool here; duplicate resolution comes before the per-folder fixes because it moves whole folders around; and stem tagging runs on both sides of it so duplicate resolution can find split audio by its conventional name, and so anything it merges in under a non-standard name still gets normalized. The second tagging pass is idempotent and normally a no-op — in a *dry run* it reports the same counts as the first only because nothing was actually applied in between.
+
+  It deliberately leaves out `prune_desynced_stems.py`, which deletes files permanently. Run that one by hand.
+
+### Individual remediations
 
 - **`scripts/tag_split_audio.py`** — scans every folder under `songs/` that has `vocals.ogg`. If `instrumental.ogg` is present too, it's used as-is; if only `accompaniment.ogg` is present (see the naming quirk below), it's renamed to `instrumental.ogg`. Every chart (`.txt`) in the folder then has its `#VOCALS`/`#INSTRUMENTAL` tags added if missing, corrected if they still point at `accompaniment.ogg` after a rename, and deduplicated if a tag appears more than once (a pre-existing bug used to insert tags blindly, sometimes duplicating them). Defaults to a dry run.
 
@@ -74,10 +91,57 @@ Requires [`uv`](https://docs.astral.sh/uv/).
   uv run scripts/fix_missing_mp3.py --write     # apply changes
   ```
 
-- **`scripts/find-missing-usdb.sh`** — lists every song folder (default `songs/`) that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Writes bash/WSL paths (`/mnt/c/...`); pass a different path as `$1` if running outside WSL.
+- **`scripts/resolve_duplicate_songs.py`** — finds song folders whose name ends in `" (N)"` (left behind by a re-download alongside the original folder) and reconciles each pair. One copy becomes the **keeper** and the other is retired into `songs.replaced/`; the keeper always ends up named plainly, without the suffix. A `" (N)"` folder with no matching base folder is just the only copy of that song, so it's renamed in place. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
 
   ```bash
-  ./scripts/find-missing-usdb.sh [target-dir]
+  uv run scripts/resolve_duplicate_songs.py            # preview changes
+  uv run scripts/resolve_duplicate_songs.py --write     # apply changes
+  ```
+
+  **The USDB copy wins**, and when both are USDB-sourced the newer one does:
+
+  | Markers | Keeper |
+  |---|---|
+  | Only the `" (N)"` copy has one | the `" (N)"` copy |
+  | Only the original has one | the original |
+  | **Both** have one | **the newer entry** — ranked on the marker's own `usdb_mtime` (when the entry was last revised on USDB), falling back to the marker file's mtime to separate two downloads of the same unchanged entry. An exact tie leaves the original in place. |
+  | Neither has one | the original |
+
+  Whenever either copy is USDB-sourced the keeper is the authoritative one by construction, so its own chart metadata is left alone. Only when *neither* has a marker is there no authority — then `#LANGUAGE`/`#EDITION`/`#GENRE`/`#YEAR`/`#CREATOR` are merged in from the duplicate (duplicate wins on conflict).
+
+  Assets the keeper is missing are moved over from the retired copy and tagged on its chart: `#COVER`, `#BACKGROUND`, `#VIDEO`, plus `#VOCALS`/`#INSTRUMENTAL` — a locally separated stem pair is worth preserving, and fresh USDB downloads never include one. Stems are picked up even if the retired chart never declared them, by falling back to the conventional `vocals.ogg`/`instrumental.ogg` names. An asset counts as missing if the keeper's chart doesn't declare that tag, or declares it but names a file that isn't actually there (so broken references get repaired); an asset the keeper already has is never replaced.
+
+  **Stems are only merged when they match the keeper's own audio length** (1 second tolerance, measured with ffprobe). Stems are separated from a full mix, so a length mismatch means they came from a different rip and would play offset against the keeper's chart. Both stems come from one separation run, so a single probe settles it for the pair. A keeper holding only a video counts as having no audio and merges its stems unchecked; a keeper with neither audio nor video falls back to using the merged instrumental as its `#MP3`.
+
+  Timing tags (`#BPM`, `#GAP`, `#MEDLEYSTARTBEAT`/`#MEDLEYENDBEAT`, `#START`, `#PREVIEWSTART`, `#VIDEOGAP`, `#END`) and `#MP3` are never copied between charts: they're calibrated to their own chart's note-beat numbers and audio — e.g. `Heart - Alone`'s two charts differ by exactly 2x in both BPM and every note position, so copying one chart's BPM onto the other's notes would desync playback.
+
+- **`scripts/strip_bom.py`** — removes UTF-8 byte-order marks from charts. A BOM is invisible but isn't whitespace, so a header line carrying one never looks like a `#TAG:` line to a parser: tools conclude the chart declares no tags at all and re-add ones it already had. Marks are stripped wherever they appear, including mid-file (the tell-tale of a tool having inserted a line above a BOM'd header).
+
+  ```bash
+  uv run scripts/strip_bom.py --write
+  ```
+
+- **`scripts/prune_desynced_stems.py`** — one-time cleanup for stems left over from an earlier version of a song. Compares each folder's instrumental against its own full-mix audio and, when they differ by more than `--tolerance` (default 1s), **deletes both stems** and strips `#VOCALS`/`#INSTRUMENTAL` from its charts.
+
+  ```bash
+  uv run scripts/prune_desynced_stems.py            # preview — always look first
+  uv run scripts/prune_desynced_stems.py --write    # PERMANENT deletion
+  ```
+
+  **Deletion cannot be undone** — `songs/` is gitignored, so there's no git history to restore from. This is why `fix_my_library.py` doesn't run it. It skips, and reports, any folder with no full-mix audio to compare against (a video is *not* used as the reference: music videos routinely carry extra footage, so their duration legitimately differs) and any folder whose `#MP3` points at a stem (deleting those would leave no audio at all). Since `fix_missing_mp3.py` creates exactly that kind of `#MP3` pointer for stems-only folders, run this *before* `fix_my_library.py` if you want those folders considered.
+
+- **`scripts/find_missing_video.py`** — reports songs with no usable background video, split into three separately-fixable problems: no video file at all, `#VIDEO` naming a file that isn't there, and a video sitting in the folder that no chart declares. `--write` fixes the third case by adding `#VIDEO` (only when the folder has exactly one video — it won't guess between several).
+
+  ```bash
+  uv run scripts/find_missing_video.py > video-missing.txt   # default: songs with no video
+  uv run scripts/find_missing_video.py --category broken     # or: untagged, all
+  uv run scripts/find_missing_video.py --write               # tag the untagged ones
+  ```
+
+- **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one folder per line (sorted) to stdout, with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass a directory to scan somewhere other than `songs/`, or `--names-only` for bare `<Artist> - <Title>` names instead of full paths.
+
+  ```bash
+  uv run scripts/find_missing_usdb.py > usdb-missing.txt
   ```
 
 ## Known quirks
