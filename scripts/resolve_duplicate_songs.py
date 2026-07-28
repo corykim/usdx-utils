@@ -82,12 +82,9 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-DUPLICATE_SUFFIX_RE = re.compile(r"^(?P<base>.+) \(\d+\)$")
-
-# Punctuation that survives name normalization -- see normalize_name().
-PRESERVED_PUNCTUATION = frozenset("[]- ")
-
-# The " (N)" a re-download leaves on a folder name, removed before matching.
+# The " (N)" a re-download leaves on a folder name. Used both to group copies
+# and to name the survivor, so the two can never disagree about what the
+# suffix is.
 TRAILING_COPY_NUMBER_RE = re.compile(r"\s*\(\s*\d+\s*\)\s*$")
 
 # The only descriptive tags merged from the duplicate's chart into the base's.
@@ -178,8 +175,11 @@ TAG_ENCODINGS = ("utf-8-sig", "cp1252")
 
 
 def base_name_for(dir_name: str) -> str | None:
-    match = DUPLICATE_SUFFIX_RE.match(dir_name)
-    return match.group("base") if match else None
+    """The name without its " (N)" copy marker, or None if it has none. Only
+    the marker is removed -- the rest of the name is preserved exactly, since
+    this is what the surviving folder gets called on disk."""
+    stripped = TRAILING_COPY_NUMBER_RE.sub("", dir_name)
+    return stripped if stripped != dir_name else None
 
 
 def normalize_name(name: str) -> str:
@@ -188,17 +188,18 @@ def normalize_name(name: str) -> str:
     "Don’t" version, or "Wham! - Last Christmas" and "Wham - Last Christmas".
 
     A trailing " (N)" is a re-download marker rather than part of the title,
-    so it comes off first; any remaining parentheses lose their brackets but
-    keep their words, so "Don’t You (Forget About Me)" lines up with "Don't
-    You Forget About Me". Case and the rest of the punctuation are dropped
-    too, except " - ", which separates artist from title, and […], which
-    marks variants like "[DUET]". Runs of whitespace collapse to one space,
-    since removing punctuation can leave gaps behind.
+    so it comes off first. Then all punctuation goes, case is folded, and
+    runs of whitespace collapse to a single space (stripping punctuation
+    leaves gaps behind, and some folder names carry stray double spaces).
+
+    Punctuation is removed rather than turned into a space so initialisms
+    survive: "Born In The U.S.A" and "Born in the USA" both land on "usa",
+    as do "Y.M.C.A" and "YMCA". Words inside brackets are kept, so variant
+    markers still separate songs -- "Barbie Girl [DUET]" normalizes to
+    "barbie girl duet", which is not "barbie girl".
     """
     without_copy_number = TRAILING_COPY_NUMBER_RE.sub("", name.lower())
-    kept = "".join(
-        c for c in without_copy_number if c.isalnum() or c in PRESERVED_PUNCTUATION
-    )
+    kept = "".join(c if c.isalnum() else " " if c.isspace() else "" for c in without_copy_number)
     return " ".join(kept.split())
 
 
@@ -414,6 +415,50 @@ def charts_in(directory: Path) -> list[Path]:
     return [p for p in sorted(directory.glob("*.txt")) if not p.name.startswith("._")]
 
 
+def choose_keeper(members: list[Path]) -> tuple[Path, str]:
+    """Pick which copy of a song survives, and explain why. USDB provenance
+    wins, then the newer entry; failing that the copy without a " (N)" copy
+    marker -- the original -- stays, with the name as a final tiebreak so the
+    choice never depends on directory order."""
+
+    def rank(directory: Path) -> tuple[int, tuple[int, int], int, str]:
+        stamp = usdb_stamp(directory)
+        return (
+            1 if stamp is not None else 0,
+            stamp if stamp is not None else (0, 0),
+            0 if base_name_for(directory.name) else 1,
+            directory.name,
+        )
+
+    ordered = sorted(members, key=rank, reverse=True)
+    keeper = ordered[0]
+    stamps = [usdb_stamp(m) for m in members]
+    marked = [s for s in stamps if s is not None]
+
+    if not marked:
+        why = "no copy has a .usdb marker, so the original stays"
+    elif len(marked) == 1:
+        why = "it has the only .usdb marker"
+    elif len(set(marked)) == 1:
+        why = f"every copy has the same .usdb marker ({describe_stamp(marked[0])}), so the original stays"
+    else:
+        # Equal upstream revisions mean the download date ranked them.
+        by_download = len({s[0] for s in marked}) == 1
+        why = f"it has the newest .usdb marker ({describe_stamp(max(marked), by_download=by_download)})"
+    return keeper, why
+
+
+def archive_destination(replaced_dir: Path, retired: Path) -> Path | None:
+    """Where a retired copy lands. Prefers its name without the " (N)" copy
+    marker, but keeps the marker rather than colliding with something already
+    archived; returns None when both are taken."""
+    for candidate in (base_name_for(retired.name) or retired.name, retired.name):
+        destination = replaced_dir / candidate
+        if not destination.exists():
+            return destination
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -447,144 +492,118 @@ def main() -> int:
     renamed = 0
     skipped = 0
     problems = 0
+    vacated: set[Path] = set()
 
-    song_dirs = sorted(p for p in songs_dir.iterdir() if p.is_dir())
-
-    # Index the non-duplicate folders by normalized name, so a " (N)" folder
-    # finds its original even when the two disagree on punctuation or case.
-    by_normalized: dict[str, list[Path]] = {}
-    for song_dir in song_dirs:
-        if base_name_for(song_dir.name) is None:
-            by_normalized.setdefault(normalize_name(song_dir.name), []).append(song_dir)
-
-    for dup_dir in song_dirs:
-        base_name = base_name_for(dup_dir.name)
-        if base_name is None:
+    # Group every folder by normalized name: two spellings of the same song
+    # are duplicates of each other whether or not either carries a " (N)".
+    groups: dict[str, list[Path]] = {}
+    for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
+        if song_dir.name.startswith("."):
             continue
+        groups.setdefault(normalize_name(song_dir.name), []).append(song_dir)
 
-        matches = by_normalized.get(normalize_name(base_name), [])
-        if len(matches) > 1:
-            names = ", ".join(sorted(m.name for m in matches))
-            print(f"skip (ambiguous -- could be any of: {names}): {dup_dir.name}")
-            skipped += 1
-            continue
-
-        if not matches:
-            # Nothing to reconcile against -- this is the only copy, just
-            # drop the " (N)" suffix so it stops looking like a duplicate.
-            target = songs_dir / base_name
+    for _key, members in sorted(groups.items()):
+        if len(members) == 1:
+            # Only copy of this song. Nothing to reconcile, but drop a stray
+            # " (N)" so it stops looking like a duplicate.
+            only = members[0]
+            keeper_target = base_name_for(only.name)
+            if keeper_target is None:
+                continue
+            target = songs_dir / keeper_target
             if target.exists():
-                print(f"skip (songs/{base_name} exists but is not a directory): {dup_dir.name}")
+                print(f"skip (songs/{keeper_target} already exists): {only.name}")
                 skipped += 1
                 continue
             verb = "renamed" if args.write else "would rename"
-            print(f"{verb}: songs/{dup_dir.name} -> songs/{base_name}")
+            print(f"{verb}: songs/{only.name} -> songs/{keeper_target}")
             if args.write:
-                dup_dir.rename(target)
+                only.rename(target)
             renamed += 1
             continue
 
-        base_dir = matches[0]
-
-        # The USDB-sourced copy is the better version, so it's the one kept.
-        # When both are USDB-sourced the newer entry wins; a tie, or neither
-        # having a marker, leaves the original base folder canonical.
-        dup_stamp = usdb_stamp(dup_dir)
-        base_stamp = usdb_stamp(base_dir)
-        if dup_stamp is not None and base_stamp is None:
-            flipped = True
-            reason = f"songs/{dup_dir.name} has the .usdb marker"
-        elif dup_stamp is not None and base_stamp is not None:
-            flipped = dup_stamp > base_stamp
-            if dup_stamp == base_stamp:
-                reason = (
-                    f"both have a .usdb marker ({describe_stamp(base_stamp)}); "
-                    f"no newer copy, so the original stays"
-                )
-            else:
-                newer, older = (
-                    (dup_dir.name, base_name) if flipped else (base_name, dup_dir.name)
-                )
-                # Equal upstream revisions mean the download date is what
-                # actually ranked them, so report that instead.
-                by_download = dup_stamp[0] == base_stamp[0]
-                reason = (
-                    f"both have a .usdb marker; songs/{newer} "
-                    f"({describe_stamp(max(dup_stamp, base_stamp), by_download=by_download)}) "
-                    f"is newer than songs/{older} "
-                    f"({describe_stamp(min(dup_stamp, base_stamp), by_download=by_download)})"
-                )
-        else:
-            flipped = False
-            reason = ""
-
-        keeper, retired = (dup_dir, base_dir) if flipped else (base_dir, dup_dir)
-        if reason:
-            print(f"note: {reason}; keeping songs/{keeper.name}")
+        keeper, why = choose_keeper(members)
+        keeper_target = base_name_for(keeper.name) or keeper.name
+        others = [m for m in members if m != keeper]
+        # Names routinely contain commas, so separate them with something that
+        # cannot be mistaken for part of one.
+        print(
+            f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}\n"
+            f"  keeping songs/{keeper.name} -- {why}"
+        )
 
         keeper_charts = charts_in(keeper)
-        retired_charts = charts_in(retired)
-        if len(keeper_charts) == 1 and len(retired_charts) == 1:
-            asset_plans, asset_messages = plan_asset_merges(
-                retired, keeper, retired_charts[0], keeper_charts[0]
-            )
-            for message in asset_messages:
-                print(message)
-                if message.startswith("PROBLEM"):
-                    problems += 1
-            for _tag, filename, src in asset_plans:
-                if src is None:
-                    continue  # already sitting in the keeper folder, just needs the tag
-                verb = "moved" if args.write else "would move"
-                print(f"{verb}: songs/{retired.name}/{filename} -> songs/{keeper.name}/{filename}")
-                if args.write:
-                    shutil.move(str(src), str(keeper / filename))
+        any_marker = any(usdb_stamp(m) is not None for m in members)
 
-            changes = merge_chart_metadata(
-                retired_charts[0],
-                keeper_charts[0],
-                # Whenever either copy is USDB-sourced, the keeper is the
-                # authoritative one by construction, so its own metadata wins
-                # and only missing assets get pulled across. With no marker on
-                # either side there's no authority, so the duplicate's
-                # descriptive tags are merged into the base.
-                descriptive=dup_stamp is None and base_stamp is None,
-                extra_tags={tag: filename for tag, filename, _ in asset_plans},
-                write=args.write,
-            )
-            if changes:
-                verb = "updated" if args.write else "would update"
-                print(f"{verb}: songs/{keeper.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
-        else:
-            print(
-                f"note: songs/{keeper.name} has {len(keeper_charts)} chart(s), "
-                f"songs/{retired.name} has {len(retired_charts)}; skipping metadata/asset merge"
-            )
+        for retired in others:
+            retired_charts = charts_in(retired)
+            if len(keeper_charts) == 1 and len(retired_charts) == 1:
+                asset_plans, asset_messages = plan_asset_merges(
+                    retired, keeper, retired_charts[0], keeper_charts[0]
+                )
+                for message in asset_messages:
+                    print(f"  {message}")
+                    if message.startswith("PROBLEM"):
+                        problems += 1
+                for _tag, filename, src in asset_plans:
+                    if src is None:
+                        continue  # already in the keeper folder, just needs the tag
+                    verb = "moved" if args.write else "would move"
+                    print(f"  {verb}: songs/{retired.name}/{filename} -> songs/{keeper.name}/{filename}")
+                    if args.write:
+                        shutil.move(str(src), str(keeper / filename))
 
-        # The keeper is always the winning .usdb bearer, so markers never need
-        # moving -- each stays with its own folder, the retired one travelling
-        # into --replaced-dir alongside the copy it describes.
+                changes = merge_chart_metadata(
+                    retired_charts[0],
+                    keeper_charts[0],
+                    # Whenever any copy is USDB-sourced the keeper is the
+                    # authoritative one by construction, so its own metadata
+                    # wins and only missing assets get pulled across. With no
+                    # marker anywhere there's no authority, so the other
+                    # copy's descriptive tags are merged in.
+                    descriptive=not any_marker,
+                    extra_tags={tag: filename for tag, filename, _ in asset_plans},
+                    write=args.write,
+                )
+                if changes:
+                    verb = "updated" if args.write else "would update"
+                    print(f"  {verb}: songs/{keeper.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
+            else:
+                print(
+                    f"  note: songs/{keeper.name} has {len(keeper_charts)} chart(s), "
+                    f"songs/{retired.name} has {len(retired_charts)}; skipping metadata/asset merge"
+                )
 
-        dest_dir = replaced_dir / base_name
-        if dest_dir.exists():
-            print(f"skip move (songs.replaced/{base_name} already exists): {retired.name}")
-            skipped += 1
-            continue
+            # Each .usdb marker stays with its own folder; the keeper is
+            # already the winning bearer, so none need moving.
+            destination = archive_destination(replaced_dir, retired)
+            if destination is None:
+                print(f"  skip move (already archived under that name): {retired.name}")
+                skipped += 1
+                continue
 
-        verb = "moved" if args.write else "would move"
-        print(f"{verb}: songs/{retired.name} -> songs.replaced/{base_name}")
-        if args.write:
-            replaced_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(retired), str(dest_dir))
-
-        # Whichever copy survives ends up under the plain base name.
-        if flipped:
-            verb = "renamed" if args.write else "would rename"
-            print(f"{verb}: songs/{keeper.name} -> songs/{base_name}")
+            verb = "moved" if args.write else "would move"
+            print(f"  {verb}: songs/{retired.name} -> songs.replaced/{destination.name}")
             if args.write:
-                keeper.rename(songs_dir / base_name)
+                replaced_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(retired), str(destination))
+            vacated.add(retired)
+            resolved += 1
 
-        resolved += 1
+        # The survivor sheds any " (N)" of its own, now that the copies it
+        # was competing with have moved out of the way.
+        if keeper.name != keeper_target:
+            target = songs_dir / keeper_target
+            # In a dry run the copies "moved" out are still on disk, so a
+            # target this run vacates does not count as occupied.
+            if target.exists() and target not in vacated:
+                print(f"  skip rename (songs/{keeper_target} still exists): {keeper.name}")
+                skipped += 1
+            else:
+                verb = "renamed" if args.write else "would rename"
+                print(f"  {verb}: songs/{keeper.name} -> songs/{keeper_target}")
+                if args.write:
+                    keeper.rename(target)
 
     mode = "write" if args.write else "dry-run"
     print(

@@ -91,9 +91,13 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/fix_missing_mp3.py --write     # apply changes
   ```
 
-- **`scripts/resolve_duplicate_songs.py`** — finds song folders whose name ends in `" (N)"` (left behind by a re-download alongside the original folder) and reconciles each pair. One copy becomes the **keeper** and the other is retired into `songs.replaced/`; the keeper always ends up named plainly, without the suffix. A `" (N)"` folder with no matching original is just the only copy of that song, so it's renamed in place. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
+- **`scripts/resolve_duplicate_songs.py`** — finds song folders that are the same song stored more than once and reconciles each set. One copy becomes the **keeper**; the rest are retired into `songs.replaced/`. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
 
-  Folders are paired up on a **normalized** name, so a re-download that changed the punctuation still finds its original. A trailing `" (N)"` comes off first, then remaining parentheses lose their brackets but keep their words, then case and the rest of the punctuation go — leaving `" - "` (artist/title separator) and `[…]` (variant markers like `[DUET]`) intact so genuinely different songs don't collide. So `Don’t You (Forget About Me) (1)` pairs with `Don't You Forget About Me`, while `Barbie Girl [DUET]` stays separate from `Barbie Girl`. If a duplicate's normalized name matches more than one folder it's skipped and reported rather than guessed at.
+  Folders are grouped by a **normalized** name, so copies pair up however they're spelled. Normalization strips a trailing `" (N)"` copy marker, removes all punctuation, folds case, and collapses runs of whitespace. Punctuation is *removed* rather than turned into a space so initialisms survive — `Born In The U.S.A` and `Born in the USA` both land on `usa`. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbie girl duet`, which isn't `barbie girl`.
+
+  This means a re-download that merely re-punctuated the title is caught even when neither folder carries a `" (N)"` — `Bon Jovi - It's my life` and `Bon Jovi - It’s My Life` are one song, not two.
+
+  **The normalized form is only used for grouping; it is never written to disk.** The keeper's folder name is preserved exactly as it is, with one exception: a trailing `" (N)"` is stripped once the copies it was competing with have moved out of the way. So a keeper named `R.E.M. - What’s The Frequency, Kenneth! (1)` ends up as `R.E.M. - What’s The Frequency, Kenneth!` — every period, comma and curly quote intact.
 
   ```bash
   uv run scripts/resolve_duplicate_songs.py            # preview changes
