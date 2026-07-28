@@ -54,8 +54,8 @@ From each retired copy the keeper takes:
     but the file it names isn't there; an asset the keeper already has is
     never replaced. #MP3 is excluded -- the keeper's note timings belong to
     the keeper's own full-mix audio;
-  * split stems only when they match the keeper's own audio length (within
-    AUDIO_LENGTH_TOLERANCE_S, measured with ffprobe). Stems are separated
+  * split stems only when they match the keeper's own audio length (see
+    audio_lengths.py, which holds that check). Stems are separated
     from a full mix, so a mismatch means they came from a different rip and
     would play offset against the keeper's chart. Both stems come from one
     separation run, so a single probe settles it. A keeper holding only a
@@ -88,10 +88,11 @@ import datetime
 import json
 import re
 import shutil
-import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+
+import audio_lengths
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -230,44 +231,7 @@ ASSET_TAGS = ("COVER", "BACKGROUND", "VIDEO", "VOCALS", "INSTRUMENTAL")
 CONVENTIONAL_ASSET_NAMES = {"VOCALS": "vocals.ogg", "INSTRUMENTAL": "instrumental.ogg"}
 SPLIT_AUDIO_TAGS = frozenset({"VOCALS", "INSTRUMENTAL"})
 
-AUDIO_EXTENSIONS = frozenset({".mp3", ".ogg", ".m4a", ".wav", ".flac", ".opus"})
-VIDEO_EXTENSIONS = frozenset({".mp4", ".webm", ".mkv", ".avi"})
-STEM_FILENAMES = frozenset({"vocals.ogg", "instrumental.ogg", "accompaniment.ogg"})
 
-# Stems are separated from a full mix, so they should match it near-exactly.
-# A whole second of slack absorbs container/codec padding while still
-# catching stems that came from a different rip entirely.
-AUDIO_LENGTH_TOLERANCE_S = 1.0
-
-_duration_cache: dict[Path, float | None] = {}
-
-
-def audio_duration(path: Path) -> float | None:
-    """Length in seconds via ffprobe, or None if it can't be determined."""
-    if path in _duration_cache:
-        return _duration_cache[path]
-    result: float | None = None
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=nokey=1:noprint_wrappers=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if proc.returncode == 0:
-            try:
-                result = float(proc.stdout.strip())
-            except ValueError:
-                result = None
-    except (OSError, subprocess.TimeoutExpired):
-        result = None
-    _duration_cache[path] = result
-    return result
 
 
 def classify_audio(directory: Path, chart_tags: dict[str, tuple[int, str]]) -> tuple[Path | None, bool]:
@@ -280,8 +244,8 @@ def classify_audio(directory: Path, chart_tags: dict[str, tuple[int, str]]) -> t
         candidate = directory / tagged
         if (
             candidate.is_file()
-            and candidate.suffix.lower() in AUDIO_EXTENSIONS
-            and candidate.name.lower() not in STEM_FILENAMES
+            and candidate.suffix.lower() in audio_lengths.AUDIO_EXTENSIONS
+            and candidate.name.lower() not in audio_lengths.STEM_FILENAMES
         ):
             audio = candidate
     has_video = False
@@ -289,12 +253,12 @@ def classify_audio(directory: Path, chart_tags: dict[str, tuple[int, str]]) -> t
         if not entry.is_file():
             continue
         suffix = entry.suffix.lower()
-        if suffix in VIDEO_EXTENSIONS:
+        if suffix in audio_lengths.VIDEO_EXTENSIONS:
             has_video = True
         elif (
             audio is None
-            and suffix in AUDIO_EXTENSIONS
-            and entry.name.lower() not in STEM_FILENAMES
+            and suffix in audio_lengths.AUDIO_EXTENSIONS
+            and entry.name.lower() not in audio_lengths.STEM_FILENAMES
         ):
             audio = entry
     return audio, has_video
@@ -446,7 +410,7 @@ def plan_asset_merges(
 
     messages: list[str] = []
     dst_audio, dst_has_video = classify_audio(dst_dir, dst_tags)
-    dst_audio_duration = audio_duration(dst_audio) if dst_audio else None
+    dst_audio_duration = audio_lengths.audio_duration(dst_audio) if dst_audio else None
 
     def resolve_src(tag: str) -> Path | None:
         value = src_tags[tag][1].strip() if tag in src_tags else ""
@@ -461,7 +425,7 @@ def plan_asset_merges(
             videos = [
                 p
                 for p in sorted(src_dir.iterdir())
-                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+                if p.is_file() and p.suffix.lower() in audio_lengths.VIDEO_EXTENSIONS
             ]
             if len(videos) == 1:
                 value = videos[0].name
@@ -479,14 +443,14 @@ def plan_asset_merges(
     video_allowed = True
     if variant_set:
         src_audio, _ = classify_audio(src_dir, src_tags)
-        src_duration = audio_duration(src_audio) if src_audio else None
+        src_duration = audio_lengths.audio_duration(src_audio) if src_audio else None
         if src_duration is None or dst_audio_duration is None:
             video_allowed = False
             messages.append(
                 "skip video: cannot compare audio length between these variants, "
                 "so they are not established as the same recording"
             )
-        elif abs(src_duration - dst_audio_duration) > AUDIO_LENGTH_TOLERANCE_S:
+        elif abs(src_duration - dst_audio_duration) > audio_lengths.DEFAULT_TOLERANCE_S:
             video_allowed = False
             messages.append(
                 f"skip video: audio {src_duration:.1f}s vs keeper {dst_audio_duration:.1f}s "
@@ -497,13 +461,13 @@ def plan_asset_merges(
     if dst_audio is not None:
         probe = resolve_src("INSTRUMENTAL") or resolve_src("VOCALS")
         if probe is not None:
-            stem_duration = audio_duration(probe)
+            stem_duration = audio_lengths.audio_duration(probe)
             if stem_duration is None or dst_audio_duration is None:
                 messages.append(
                     f"note: could not measure {probe.name} or {dst_audio.name}; "
                     f"merging stems without a length check"
                 )
-            elif abs(stem_duration - dst_audio_duration) > AUDIO_LENGTH_TOLERANCE_S:
+            elif abs(stem_duration - dst_audio_duration) > audio_lengths.DEFAULT_TOLERANCE_S:
                 stems_match = False
                 messages.append(
                     f"skip stems: {probe.name} {stem_duration:.1f}s vs keeper audio "
@@ -747,7 +711,7 @@ def has_playable_media(directory: Path) -> bool:
     """Whether this copy has anything a client could play -- a full mix, a
     stem, or a video. A USDB download whose media failed has none of them."""
     return any(
-        p.suffix.lower() in AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+        p.suffix.lower() in audio_lengths.AUDIO_EXTENSIONS | audio_lengths.VIDEO_EXTENSIONS
         for p in directory.iterdir()
         if p.is_file()
     )
@@ -758,11 +722,11 @@ def describe_copy(directory: Path) -> str:
     stamp = usdb_stamp(directory)
     bits = [describe_stamp(stamp) if stamp else "no .usdb marker"]
     stems = sorted(
-        p.name for p in directory.iterdir() if p.is_file() and p.name.lower() in STEM_FILENAMES
+        p.name for p in directory.iterdir() if p.is_file() and p.name.lower() in audio_lengths.STEM_FILENAMES
     )
     if stems:
         bits.append("split audio")
-    if any(p.suffix.lower() in VIDEO_EXTENSIONS for p in directory.iterdir() if p.is_file()):
+    if any(p.suffix.lower() in audio_lengths.VIDEO_EXTENSIONS for p in directory.iterdir() if p.is_file()):
         bits.append("video")
     return ", ".join(bits)
 

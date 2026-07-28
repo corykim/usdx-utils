@@ -32,6 +32,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import audio_lengths
+
 # Windows consoles are frequently stuck on a legacy codepage (e.g. cp1252)
 # that can't represent every character in these songs' filenames. Reconfigure
 # stdout/stderr to UTF-8 so printing a path never crashes the run.
@@ -135,9 +137,11 @@ def ensure_tags(
     return changes
 
 
-def process_song_dir(song_dir: Path, songs_dir: Path, *, write: bool) -> tuple[int, int] | None:
-    """Returns (charts_checked, charts_changed), or None if this folder has
-    no split audio to act on."""
+def process_song_dir(
+    song_dir: Path, songs_dir: Path, *, tolerance: float, write: bool
+) -> tuple[int, int, bool] | None:
+    """Returns (charts_checked, charts_changed, stems_desynced), or None if
+    this folder has no split audio to act on."""
     vocals = find_case_insensitive(song_dir, VOCALS_NAME)
     instrumental = find_case_insensitive(song_dir, INSTRUMENTAL_NAME)
     accompaniment = None
@@ -146,33 +150,56 @@ def process_song_dir(song_dir: Path, songs_dir: Path, *, write: bool) -> tuple[i
     if not vocals or not (instrumental or accompaniment):
         return None
 
-    fix_instrumental = False
-    instrumental_name = instrumental.name if instrumental else INSTRUMENTAL_NAME
+    fix_instrumental = accompaniment is not None
+    instrumental_name = INSTRUMENTAL_NAME if fix_instrumental else instrumental.name
+    vocals_name = vocals.name
+    charts = [
+        chart
+        for chart in sorted(song_dir.glob("*.txt"))
+        if not chart.name.startswith("._")  # macOS AppleDouble sidecar file
+    ]
+
+    # Work out what would change before measuring anything. Most folders are
+    # already tagged, and probing every one of those with ffprobe would cost
+    # minutes to learn there was nothing to do.
+    pending = {
+        chart: ensure_tags(
+            chart, vocals_name, instrumental_name, fix_instrumental=fix_instrumental, write=False
+        )
+        for chart in charts
+    }
+    if not fix_instrumental and not any(pending.values()):
+        return len(charts), 0, False
+
+    # Tagging stems that don't belong to this folder's own mix would point the
+    # chart at audio that plays offset against its notes, so leave those alone
+    # and say so. Nothing to compare against is not a mismatch.
+    matches, explanation = audio_lengths.stems_match_mix(song_dir, tolerance)
+    if matches is False:
+        print(f"skip (stems do not match the full mix): {song_dir.relative_to(songs_dir)}")
+        print(f"    {explanation}")
+        return len(charts), 0, True
+
     if accompaniment:
-        fix_instrumental = True
-        instrumental_name = INSTRUMENTAL_NAME
         target = song_dir / INSTRUMENTAL_NAME
         verb = "renamed" if write else "would rename"
         print(f"{verb}: {accompaniment.relative_to(songs_dir)} -> {target.relative_to(songs_dir)}")
         if write:
             accompaniment.rename(target)
 
-    vocals_name = vocals.name
-    checked = 0
     changed = 0
-    for chart in sorted(song_dir.glob("*.txt")):
-        if chart.name.startswith("._"):
-            continue  # macOS AppleDouble sidecar file
-        checked += 1
-        changes = ensure_tags(
-            chart, vocals_name, instrumental_name, fix_instrumental=fix_instrumental, write=write
-        )
-        if changes:
-            changed += 1
-            verb = "updated" if write else "would update"
-            print(f"{verb}: {chart.relative_to(songs_dir)} -> {'; '.join(changes)}")
+    for chart, changes in pending.items():
+        if not changes:
+            continue
+        changed += 1
+        if write:
+            ensure_tags(
+                chart, vocals_name, instrumental_name, fix_instrumental=fix_instrumental, write=True
+            )
+        verb = "updated" if write else "would update"
+        print(f"{verb}: {chart.relative_to(songs_dir)} -> {'; '.join(changes)}")
 
-    return checked, changed
+    return len(charts), changed, False
 
 
 def import_stranded(stranded_file: Path, songs_dir: Path, *, write: bool) -> int:
@@ -242,6 +269,13 @@ def main() -> int:
         help="Directory containing one song folder per subdirectory (default: ../songs)",
     )
     parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=audio_lengths.DEFAULT_TOLERANCE_S,
+        help="How far a stem may differ in seconds from the folder's full mix "
+        "before it is left untagged (default: %(default)s).",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually modify files. Without this flag, only report what would change.",
@@ -267,21 +301,30 @@ def main() -> int:
     changed_charts = 0
     checked_charts = 0
     folders_with_split_audio = 0
+    desynced_folders = 0
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
-        result = process_song_dir(song_dir, songs_dir, write=args.write)
+        result = process_song_dir(
+            song_dir, songs_dir, tolerance=args.tolerance, write=args.write
+        )
         if result is None:
             continue
         folders_with_split_audio += 1
-        checked, changed = result
+        checked, changed, desynced = result
         checked_charts += checked
         changed_charts += changed
+        desynced_folders += desynced
 
     mode = "write" if args.write else "dry-run"
     print(
         f"\n[{mode}] folders with split audio: {folders_with_split_audio}, "
         f"charts checked: {checked_charts}, charts {'changed' if args.write else 'needing changes'}: {changed_charts}"
     )
+    if desynced_folders:
+        print(
+            f"[{mode}] folders left untagged, stems disagree with the full mix: "
+            f"{desynced_folders} (see prune_desynced_stems.py)"
+        )
     if not args.write and changed_charts:
         print("Re-run with --write to apply changes.")
     return 0

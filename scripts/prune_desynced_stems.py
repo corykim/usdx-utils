@@ -32,16 +32,15 @@ ffprobe (ffmpeg) on PATH.
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+import audio_lengths
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-STEM_FILENAMES = ("vocals.ogg", "instrumental.ogg", "accompaniment.ogg")
-AUDIO_EXTENSIONS = frozenset({".mp3", ".ogg", ".m4a", ".wav", ".flac", ".opus"})
 SPLIT_AUDIO_TAGS = ("VOCALS", "INSTRUMENTAL")
 # utf-8-sig decodes UTF-8 with or without a leading BOM and drops it. Charts
 # are always written back as plain UTF-8, so a BOM never survives an edit.
@@ -60,29 +59,6 @@ def read_text_preserving_encoding(path: Path) -> tuple[str, str]:
         return text.replace("﻿", ""), "utf-8" if encoding == "utf-8-sig" else encoding
     return raw.decode("utf-8", errors="replace"), "utf-8"
 
-
-def audio_duration(path: Path) -> float | None:
-    """Length in seconds via ffprobe, or None if it can't be determined."""
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=nokey=1:noprint_wrappers=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        return float(proc.stdout.strip())
-    except ValueError:
-        return None
 
 
 def charts_in(directory: Path) -> list[Path]:
@@ -105,27 +81,6 @@ def tag_value(text: str, tag: str) -> str | None:
     return None
 
 
-def stems_in(directory: Path) -> list[Path]:
-    found = []
-    for name in STEM_FILENAMES:
-        for entry in directory.iterdir():
-            if entry.is_file() and entry.name.lower() == name:
-                found.append(entry)
-    return found
-
-
-def find_full_mix(directory: Path) -> Path | None:
-    """The folder's full-mix audio file. Stems never count; neither do
-    videos (see module docstring)."""
-    stem_names = set(STEM_FILENAMES)
-    for entry in sorted(directory.iterdir()):
-        if (
-            entry.is_file()
-            and entry.suffix.lower() in AUDIO_EXTENSIONS
-            and entry.name.lower() not in stem_names
-        ):
-            return entry
-    return None
 
 
 def strip_stem_tags(chart: Path, *, write: bool) -> list[str]:
@@ -162,7 +117,7 @@ def main() -> int:
     parser.add_argument(
         "--tolerance",
         type=float,
-        default=1.0,
+        default=audio_lengths.DEFAULT_TOLERANCE_S,
         help="Allowed difference in seconds between stem and full mix (default: 1.0)",
     )
     parser.add_argument(
@@ -187,12 +142,12 @@ def main() -> int:
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         if song_dir.name.startswith("."):
             continue
-        stems = stems_in(song_dir)
+        stems = audio_lengths.stems_in(song_dir)
         if not stems:
             continue
 
         charts = charts_in(song_dir)
-        stem_names = {n.lower() for n in STEM_FILENAMES}
+        stem_names = {n.lower() for n in audio_lengths.STEM_FILENAMES}
         if any(
             (tag_value(read_text_preserving_encoding(c)[0], "MP3") or "").lower() in stem_names
             for c in charts
@@ -201,7 +156,7 @@ def main() -> int:
             mp3_is_stem += 1
             continue
 
-        full_mix = find_full_mix(song_dir)
+        full_mix = audio_lengths.find_full_mix(song_dir)
         if full_mix is None:
             print(f"skip (no full-mix audio to compare against): {song_dir.name}")
             no_reference += 1
@@ -210,8 +165,8 @@ def main() -> int:
         # Both stems come out of one separation run, so measuring either
         # settles it; prefer the instrumental.
         probe = next((s for s in stems if s.name.lower() != "vocals.ogg"), stems[0])
-        stem_duration = audio_duration(probe)
-        mix_duration = audio_duration(full_mix)
+        stem_duration = audio_lengths.audio_duration(probe)
+        mix_duration = audio_lengths.audio_duration(full_mix)
         if stem_duration is None or mix_duration is None:
             print(f"skip (could not measure {probe.name} or {full_mix.name}): {song_dir.name}")
             unmeasurable += 1

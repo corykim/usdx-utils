@@ -78,6 +78,8 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/tag_split_audio.py --write     # apply changes
   ```
 
+  Stems are only tagged when they belong to the folder's **own** full mix — the same length check `prune_desynced_stems.py` uses, shared between them in `scripts/audio_lengths.py`. Pointing a chart at stems from a different rip would play them offset against its notes, so a mismatch is reported and left untagged instead. Having nothing to compare against is not a mismatch: a folder with no full mix is tagged as before. `--tolerance` sets how far apart is too far (default 1 second). The check only runs where there is actually something to tag, so an already-tagged library isn't slowed by measuring it.
+
   It also has a one-off mode for a Melody Mania (vocal-separation tool) bug: when a song's filename contains unicode characters, Melody Mania fails to write its split output into the song folder and instead strands a `<name>.vocals.ogg` / `<name>.accompaniment.ogg` pair under `%APPDATA%/LocalLow`. Point `--import-stranded` at either stranded file and it moves both into the song's folder as `vocals.ogg`/`instrumental.ogg` and tags the chart, skipping the full scan.
 
   ```bash
@@ -185,6 +187,8 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   ```
 
   **Deletion cannot be undone** — `songs/` is gitignored, so there's no git history to restore from. This is why `fix_my_library.py` doesn't run it. It skips, and reports, any folder with no full-mix audio to compare against (a video is *not* used as the reference: music videos routinely carry extra footage, so their duration legitimately differs) and any folder whose `#MP3` points at a stem (deleting those would leave no audio at all). Since `fix_missing_mp3.py` creates exactly that kind of `#MP3` pointer for stems-only folders, run this *before* `fix_my_library.py` if you want those folders considered.
+
+- **`scripts/audio_lengths.py`** — not a command, but the shared length check the others use. Stems come out of a song's full mix, so they should be the same length as it; when they aren't they came from a different rip and will play offset against the chart. `tag_split_audio` won't tag such stems, `prune_desynced_stems` deletes them, and `resolve_duplicate_songs` won't move them onto a keeper they don't fit.
 
 - **`scripts/find_missing_audio.py`** — lists songs whose audio never arrived. A USDB download can fetch the chart and artwork but fail on the media when the source is geo-restricted or the API refuses it, leaving a folder that holds a chart, a cover, a background and a `.usdb` marker but nothing to play. Re-tagging can't fix those — there is no file for `#MP3` to point at — so they need the media fetching again.
 
