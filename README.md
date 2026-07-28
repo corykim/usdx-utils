@@ -93,7 +93,11 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
 - **`scripts/resolve_duplicate_songs.py`** — finds song folders that are the same song stored more than once and reconciles each set. One copy becomes the **keeper**; the rest are retired into `songs.replaced/`. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
 
-  Folders are grouped by a **normalized** name, so copies pair up however they're spelled. Normalization, in order:
+  Folders are grouped by **billing and title**, matched separately because they follow different rules. The title has to agree exactly once normalized; the billing has to *describe the same act*, which means either naming exactly the same people in any order — `Lita Ford with Ozzy Osbourne` = `Ozzy Osbourne And Lita Ford` — or being the same lead plus guests: `Bob Marley & The Wailers` = `Bob Marley`, `Gotye feat. Kimbra` = `Gotye & Kimbra` = `Gotye`. A leading `The` is dropped, so `Bangles` = `The Bangles`.
+
+  Sharing *a* name isn't enough, deliberately: `Michael Bublé feat. Mariah Carey - All I Want For Christmas` is a different recording from Mariah Carey's own, and Disney's two `Beauty and the Beast` duets (Céline Dion/Peabo Bryson vs Ariana Grande/John Legend) stay apart despite the shared franchise name.
+
+  The title itself is normalized, in order:
 
   | Step | Effect |
   |---|---|
@@ -101,6 +105,7 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   | Fold accents to ASCII | `Beyoncé` → `beyonce`, `Señorita` → `senorita` |
   | Drop a featured-artist credit | `Eminem feat. Rihanna - Love The Way You Lie` → `Eminem - Love The Way You Lie` |
   | Drop a spelled-out `and` | `Hall and Oates` → `Hall & Oates` |
+  | Expand contractions | `Girls Just Wanna Have Fun` = `Girls Just Want To Have Fun` |
   | Remove punctuation, case and **all whitespace** | `B. B. King` → `bbking`, `Big Bang` → `bigbang` |
 
   Punctuation and spaces are *removed* rather than turned into separators, so `Born In The U.S.A` matches `Born in the USA`, `BIGBANG` matches `Big Bang`, `blink-182` matches `Blink 182`, and `Salt-N-Pepa` matches `Salt N' Pepa`. The `&` that `and` stands in for is punctuation and drops out anyway, so removing the word too puts the two spellings on the same footing — it's matched on word boundaries, leaving `The Band`, `Andy Williams` and `Randy Travis` alone. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbiegirlduet`, which isn't `barbiegirl`.
@@ -112,6 +117,8 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   **The normalized form is only used for grouping; it is never written to disk.** The keeper's folder name is preserved exactly as it is, with one exception: a trailing `" (N)"` is stripped once the copies it was competing with have moved out of the way. So a keeper named `R.E.M. - What’s The Frequency, Kenneth! (1)` ends up as `R.E.M. - What’s The Frequency, Kenneth!` — every period, comma and curly quote intact.
 
   **`--merge-variants`** additionally treats a parenthesized phrase as noise rather than part of the title, so `Song (Live)` and `Song (Album Version)` count as copies of `Song`. Square brackets are still respected, so `[DUET]` stays a separate song.
+
+  The phrase is dropped wherever it sits, so the `<artist> - (<variant>) <title>` form is caught too — `Artist - (Live) Some Song` collapses onto `Artist - Some Song`.
 
   Be deliberate with this one: in a karaoke library a parenthetical is often a genuinely different chart, not a redundant copy. On the current library it groups 223 sets, and among them are `In Da Club` vs `(Explicit Version)`, `Jungle P` vs `(TV)` (a short TV edit), `Dirty Deeds Done Dirt Cheap` vs `(Live at Donington)`, and `Girlfriend` vs `(German)` — different lyrics, lengths, performances and languages.
 

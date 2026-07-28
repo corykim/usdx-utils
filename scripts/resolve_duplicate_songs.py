@@ -121,6 +121,37 @@ ARTIST_TITLE_SEPARATOR = " - "
 # Oates" on the same footing. Word-bounded, or it would eat into "Band".
 AND_WORD_RE = re.compile(r"\band\b")
 
+# Contractions a title may or may not spell out -- "Girls Just Wanna Have Fun"
+# and "Girls Just Want To Have Fun" are one song. Expanded to the long form,
+# which then loses its space along with everything else.
+CONTRACTIONS = {"wanna": "want to"}
+CONTRACTION_RE = re.compile(r"\b(?:%s)\b" % "|".join(CONTRACTIONS))
+
+# What separates one artist from the next in a billing. Splitting on these
+# rather than discarding what follows means a guest still counts as an artist,
+# which is what lets a differently-ordered billing line up.
+ARTIST_SEPARATOR_RE = re.compile(
+    r"\s*(?:&|\+|,|/|\bwith\b|\band\b|\bfeaturing\b|\bfeat\b\.?|\bft\b\.?)\s*"
+)
+
+# A leading article on a band name: "The Bangles" is the "Bangles".
+LEADING_ARTICLE_RE = re.compile(r"^the\s+")
+
+
+def artist_signature(artist: str) -> tuple[str, frozenset[str]]:
+    """The billing as (lead act, all acts), each squashed to bare characters.
+
+    Both halves are needed. The lead is what says "Bob Marley & The Wailers"
+    is still Bob Marley, while the full set is what lets "Lita Ford with Ozzy
+    Osbourne" and "Ozzy Osbourne And Lita Ford" line up despite the reversal.
+    """
+    acts: list[str] = []
+    for act in ARTIST_SEPARATOR_RE.split(artist):
+        squashed = "".join(c for c in LEADING_ARTICLE_RE.sub("", act.strip()) if c.isalnum())
+        if squashed and squashed not in acts:
+            acts.append(squashed)
+    return (acts[0] if acts else ""), frozenset(acts)
+
 
 def strip_featuring(text: str) -> str:
     """Drop a featured-artist credit from the artist half of "<artist> -
@@ -272,7 +303,9 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     Version)" both collapse onto "song". Square brackets are untouched even
     then -- a [DUET] is a different chart, not a different mix of one.
     """
-    text = strip_featuring(fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower())))
+    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
+    text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
+    text = strip_featuring(text)
     if merge_variants:
         while True:
             collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)
@@ -533,6 +566,87 @@ def merge_chart_metadata(
     return changes
 
 
+def song_signature(
+    name: str, *, merge_variants: bool = False
+) -> tuple[str, frozenset[str], str]:
+    """Split a folder name into (lead act, all acts, normalized title).
+
+    Title and billing match by different rules -- see billings_match() -- so
+    they are kept apart rather than mashed into one key.
+    """
+    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
+    text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
+    artist, separator, title = text.partition(ARTIST_TITLE_SEPARATOR)
+    if not separator:
+        # No "<artist> - <title>" shape, so there is nothing to bill; the whole
+        # name has to match.
+        return "", frozenset(), normalize_name(name, merge_variants=merge_variants)
+
+    if merge_variants:
+        while True:
+            collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", title)
+            if collapsed == title:
+                break
+            title = collapsed
+    title_key = "".join(c for c in AND_WORD_RE.sub(" ", title) if c.isalnum())
+    lead, acts = artist_signature(artist)
+    return lead, acts, title_key
+
+
+def billings_match(
+    a: tuple[str, frozenset[str]], b: tuple[str, frozenset[str]]
+) -> bool:
+    """Whether two billings of one title are the same act.
+
+    Either they name exactly the same people, in whatever order -- "Lita Ford
+    with Ozzy Osbourne" and "Ozzy Osbourne And Lita Ford" -- or one billing is
+    the other plus guests under the same lead, as "Bob Marley & The Wailers"
+    is to "Bob Marley" and "Gotye feat. Kimbra" to "Gotye".
+
+    Both halves of that second test earn their keep. Sharing a name is not
+    enough on its own: "Michael Buble feat. Mariah Carey" is a different
+    recording from Mariah Carey's own. Neither is a shared lead, because a
+    franchise name splits into the same opening fragment for two unrelated
+    casts -- Disney's "Beauty and the Beast" leads with "Beauty" whether it is
+    the Celine Dion duet or the Ariana Grande one, and only the differing rest
+    of the billing tells them apart.
+    """
+    (lead_a, acts_a), (lead_b, acts_b) = a, b
+    if not acts_a or not acts_b:
+        return True  # nothing billed on one side, so the title carries it
+    if acts_a == acts_b:
+        return True
+    return lead_a == lead_b and (acts_a < acts_b or acts_b < acts_a)
+
+
+def group_songs(
+    song_dirs: list[Path], *, merge_variants: bool = False
+) -> list[list[Path]]:
+    """Cluster folders that hold the same song: identical title, and billings
+    that billings_match()."""
+    by_title: dict[str, list[tuple[str, frozenset[str], Path]]] = {}
+    for song_dir in song_dirs:
+        lead, acts, title = song_signature(song_dir.name, merge_variants=merge_variants)
+        by_title.setdefault(title, []).append((lead, acts, song_dir))
+
+    groups: list[list[Path]] = []
+    for entries in by_title.values():
+        clusters: list[tuple[list[tuple[str, frozenset[str]]], list[Path]]] = []
+        for lead, acts, song_dir in entries:
+            # Transitive: a billing joins any cluster it matches, and merges
+            # those clusters together if it matches several.
+            hits = [c for c in clusters if any(billings_match((lead, acts), b) for b in c[0])]
+            merged_billings = [(lead, acts)]
+            merged_dirs = [song_dir]
+            for cluster in hits:
+                merged_billings += cluster[0]
+                merged_dirs += cluster[1]
+                clusters.remove(cluster)
+            clusters.append((merged_billings, merged_dirs))
+        groups.extend(sorted(dirs, key=lambda p: p.name) for _, dirs in clusters)
+    return groups
+
+
 def charts_in(directory: Path) -> list[Path]:
     return [p for p in sorted(directory.glob("*.txt")) if not p.name.startswith("._")]
 
@@ -701,16 +815,19 @@ def main() -> int:
     problems = 0
     vacated: set[Path] = set()
 
-    # Group every folder by normalized name: two spellings of the same song
-    # are duplicates of each other whether or not either carries a " (N)".
-    groups: dict[str, list[Path]] = {}
-    for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
-        if song_dir.name.startswith("."):
-            continue
-        key = normalize_name(song_dir.name, merge_variants=args.merge_variants)
-        groups.setdefault(key, []).append(song_dir)
+    # Cluster folders holding the same song, however each is spelled, and
+    # whether or not either carries a " (N)".
+    song_dirs = [
+        p
+        for p in sorted(songs_dir.iterdir())
+        if p.is_dir() and not p.name.startswith(".")
+    ]
+    groups = sorted(
+        group_songs(song_dirs, merge_variants=args.merge_variants),
+        key=lambda members: members[0].name,
+    )
 
-    for _key, members in sorted(groups.items()):
+    for members in groups:
         if len(members) == 1:
             # Only copy of this song. Nothing to reconcile, but drop a stray
             # " (N)" so it stops looking like a duplicate.
