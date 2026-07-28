@@ -130,9 +130,9 @@ def main() -> int:
         "syncer manages and could be asked to fetch again.",
     )
     parser.add_argument(
-        "--names-only",
+        "--full-paths",
         action="store_true",
-        help="Print bare '<Artist> - <Title>' folder names instead of full paths.",
+        help="Print the full path to each folder instead of just its name.",
     )
     parser.add_argument(
         "--details",
@@ -165,7 +165,7 @@ def main() -> int:
         # itself to compare lengths against.
         audio = [p for p in files if p.suffix.lower() in AUDIO_EXTENSIONS]
         videos = [p for p in files if p.suffix.lower() in VIDEO_EXTENSIONS]
-        label = song_dir.name if args.names_only else str(song_dir)
+        label = str(song_dir) if args.full_paths else song_dir.name
         if args.details:
             label = f"{label}  --  {describe_failure(song_dir)}"
 
@@ -176,7 +176,7 @@ def main() -> int:
         for chart in charts_in(song_dir):
             declared = mp3_tag_value(chart)
             chart_label = (
-                f"{song_dir.name}/{chart.name}" if args.names_only else str(chart)
+                str(chart) if args.full_paths else f"{song_dir.name}/{chart.name}"
             )
             if declared is None:
                 untagged.append(chart_label)

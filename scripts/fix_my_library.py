@@ -28,7 +28,7 @@ The sequence:
   6. find_missing_video   Declares #VIDEO for videos already sitting in a
                           folder untagged.
 
---quiet is handed on to the steps that understand it, so they report only
+--terse is handed on to the steps that understand it, so they report only
 what they actually changed.
 
 Then it reports what still needs a human: songs whose audio never downloaded,
@@ -63,40 +63,59 @@ class Step:
     summary: str
     # find_missing_*.py take the songs dir positionally; the rest use --songs-dir.
     positional_songs_dir: bool = False
-    # Only some steps have anything to hold back, and passing --quiet to one
+    # Some steps are reporting scripts pressed into service as fixers. Their
+    # listing on stdout is not what the step is for, and drowns out the run.
+    discard_stdout: bool = False
+    # Only some steps have anything to hold back, and passing --terse to one
     # that doesn't understand it would abort the run on an unknown argument.
-    accepts_quiet: bool = False
+    accepts_terse: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
 STEPS = [
     Step("strip_bom.py", "Remove UTF-8 BOMs from charts"),
-    Step("tag_split_audio.py", "Normalize split-audio filenames and tags"),
+    Step(
+        "tag_split_audio.py",
+        "Normalize split-audio filenames and tags",
+        accepts_terse=True,
+    ),
     Step(
         "resolve_duplicate_songs.py",
         "Reconcile folders holding the same song twice",
-        accepts_quiet=True,
+        accepts_terse=True,
     ),
-    Step("tag_split_audio.py", "Re-normalize stems merged in by the previous step"),
-    Step("fix_missing_mp3.py", "Backfill missing #MP3 tags"),
-    Step("find_missing_video.py", "Declare #VIDEO for untagged videos", positional_songs_dir=True),
+    Step(
+        "tag_split_audio.py",
+        "Re-normalize stems merged in by the previous step",
+        accepts_terse=True,
+    ),
+    Step("fix_missing_mp3.py", "Backfill missing #MP3 tags", accepts_terse=True),
+    Step(
+        "find_missing_video.py",
+        "Declare #VIDEO for untagged videos",
+        positional_songs_dir=True,
+        discard_stdout=True,
+        accepts_terse=True,
+    ),
 ]
 
 
-def run_step(step: Step, songs_dir: Path | None, *, quiet: bool, write: bool) -> int:
+def run_step(step: Step, songs_dir: Path | None, *, terse: bool, write: bool) -> int:
     argv = [sys.executable, str(SCRIPTS_DIR / step.script)]
     if songs_dir is not None:
         argv += [str(songs_dir)] if step.positional_songs_dir else ["--songs-dir", str(songs_dir)]
     argv += step.extra_args
-    if quiet and step.accepts_quiet:
-        argv.append("--quiet")
+    if terse and step.accepts_terse:
+        argv.append("--terse")
     if write:
         argv.append("--write")
     # Children inherit the console and write to it directly, so flush our own
     # buffered output first or the step headers land after their output.
     sys.stdout.flush()
     sys.stderr.flush()
-    proc = subprocess.run(argv)
+    proc = subprocess.run(
+        argv, stdout=subprocess.DEVNULL if step.discard_stdout else None
+    )
     return proc.returncode
 
 
@@ -111,9 +130,9 @@ def main() -> int:
         help="Override the songs directory (default: each script's own ../songs)",
     )
     parser.add_argument(
-        "--quiet",
+        "--terse",
         action="store_true",
-        help="Pass --quiet on to the steps that understand it, so they report "
+        help="Pass --terse on to the steps that understand it, so they report "
         "only what they actually changed.",
     )
     parser.add_argument(
@@ -128,7 +147,7 @@ def main() -> int:
 
     for number, step in enumerate(STEPS, start=1):
         print(f"\n----- step {number}/{len(STEPS)}: {step.script} -- {step.summary} -----")
-        code = run_step(step, args.songs_dir, quiet=args.quiet, write=args.write)
+        code = run_step(step, args.songs_dir, terse=args.terse, write=args.write)
         if code != 0:
             print(
                 f"\nstep {number} ({step.script}) exited {code}; stopping so a "
@@ -137,37 +156,48 @@ def main() -> int:
             )
             return code
 
-    print("\n----- report: songs with no audio at all -----")
-    sys.stdout.flush()
-    audio_argv = [sys.executable, str(SCRIPTS_DIR / "find_missing_audio.py")]
-    if args.songs_dir is not None:
-        audio_argv.append(str(args.songs_dir))
-    subprocess.run(audio_argv, stdout=subprocess.DEVNULL)
+    def run_report(script: str, heading: str, **kwargs: object) -> int:
+        """Run a reporting script, returning its exit code."""
+        print(f"\n----- report: {heading} -----")
+        sys.stdout.flush()
+        argv = [sys.executable, str(SCRIPTS_DIR / script)]
+        if args.songs_dir is not None:
+            argv.append(str(args.songs_dir))
+        return subprocess.run(argv, **kwargs).returncode  # type: ignore[arg-type]
 
-    print("\n----- report: songs still missing a video -----")
-    sys.stdout.flush()
-    report_argv = [sys.executable, str(SCRIPTS_DIR / "find_missing_video.py")]
-    if args.songs_dir is not None:
-        report_argv.append(str(args.songs_dir))
-    subprocess.run(report_argv, stdout=subprocess.DEVNULL)
+    for script, heading in (
+        ("find_missing_audio.py", "songs with no audio at all"),
+        ("find_missing_video.py", "songs still missing a video"),
+    ):
+        code = run_report(script, heading, stdout=subprocess.DEVNULL)
+        if code != 0:
+            print(f"\n{script} exited {code}; stopping.", file=sys.stderr)
+            return code
 
-    print("\n----- report: songs not yet cross-referenced against USDB -----")
-    sys.stdout.flush()
-    usdb_argv = [sys.executable, str(SCRIPTS_DIR / "find_missing_usdb.py")]
-    if args.songs_dir is not None:
-        usdb_argv.append(str(args.songs_dir))
     # Keep the listing beside the library it describes, so pointing --songs-dir
     # somewhere else can never overwrite the real one.
     library_root = (
         args.songs_dir.resolve().parent if args.songs_dir is not None else SCRIPTS_DIR.parent
     )
     target = library_root / "usdb-missing.txt"
+    heading = "songs not yet cross-referenced against USDB"
     if args.write:
-        with target.open("w", encoding="utf-8") as handle:
-            subprocess.run(usdb_argv, stdout=handle)
+        # Write to a temporary file and swap it in, so a failed run cannot
+        # leave usdb-missing.txt half-written or truncated.
+        staged = target.with_suffix(target.suffix + ".partial")
+        with staged.open("w", encoding="utf-8") as handle:
+            code = run_report("find_missing_usdb.py", heading, stdout=handle)
+        if code != 0:
+            staged.unlink(missing_ok=True)
+            print(f"\nfind_missing_usdb.py exited {code}; {target.name} left as it was.", file=sys.stderr)
+            return code
+        staged.replace(target)
         print(f"wrote {target}")
     else:
-        subprocess.run(usdb_argv, stdout=subprocess.DEVNULL)
+        code = run_report("find_missing_usdb.py", heading, stdout=subprocess.DEVNULL)
+        if code != 0:
+            print(f"\nfind_missing_usdb.py exited {code}; stopping.", file=sys.stderr)
+            return code
         print(f"(pass --write to regenerate {target})")
 
     print(f"\n===== fix_my_library done ({mode}) =====")

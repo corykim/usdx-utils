@@ -829,7 +829,7 @@ def main() -> int:
         "part, but a copy with nothing to play can never be the keeper.",
     )
     parser.add_argument(
-        "--quiet",
+        "--terse",
         action="store_true",
         help="Say nothing about sets that end up untouched -- useful with "
         "--merge-variants, where most sets are left alone by design.",
@@ -881,10 +881,10 @@ def main() -> int:
         key=lambda members: members[0].name,
     )
 
-    # With --quiet a set's report is held back until it turns out to have
+    # With --terse a set's report is held back until it turns out to have
     # done something. Interactive runs print as they go regardless, since a
     # prompt the caller cannot see is no prompt at all.
-    buffered = args.quiet and not args.interactive
+    buffered = args.terse and not args.interactive
     report: list[str] = []
 
     def say(line: str = "") -> None:

@@ -63,10 +63,10 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   ```bash
   uv run scripts/fix_my_library.py            # preview everything
   uv run scripts/fix_my_library.py --write    # apply everything
-  uv run scripts/fix_my_library.py --quiet    # only report what changed
+  uv run scripts/fix_my_library.py --terse    # only report what changed
   ```
 
-  `--quiet` is handed on to the steps that understand it, and only those — a step that doesn't would abort the run on an unknown argument.
+  `--terse` is handed on to the steps that understand it, and only those — a step that doesn't would abort the run on an unknown argument. Any step exiting non-zero stops the run and its code is returned, so a failure never feeds bad state into a later step.
 
   The sequence is `strip_bom` → `tag_split_audio` → `resolve_duplicate_songs` → `tag_split_audio` again → `fix_missing_mp3` → `find_missing_video`. BOMs go first because one makes a header line invisible to every other tool here; duplicate resolution comes before the per-folder fixes because it moves whole folders around; and stem tagging runs on both sides of it so duplicate resolution can find split audio by its conventional name, and so anything it merges in under a non-standard name still gets normalized. The second tagging pass is idempotent and normally a no-op — in a *dry run* it reports the same counts as the first only because nothing was actually applied in between.
 
@@ -140,10 +140,10 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   **A USDB download whose media never arrived sits the round out.** Those folders hold a chart, artwork and a `.usdb` marker but nothing to play (see `find_missing_audio.py`); they're shells awaiting a re-fetch rather than copies of anything, so by default they aren't grouped, ranked or touched, and the run says how many it left alone. `--include-unplayable` brings them in — and when it does, a copy with nothing to play can never win the keeper slot, however good its marker, so the playable copy survives and the shell is retired.
 
-  **`--quiet`** drops the report for any set that ends up untouched, printing only the ones something actually happened to. The tallies at the end are unchanged, so nothing goes unaccounted for. It pairs naturally with `--merge-variants`, where most sets are left alone by design — on the current library that's 838 lines of output down to 80, with all 10 acted-on sets still shown in full. In an `--interactive` run it has little to do: the prompt for a set is on screen before you decide to skip it.
+  **`--terse`** drops the report for any set that ends up untouched, printing only the ones something actually happened to. The tallies at the end are unchanged, so nothing goes unaccounted for. Every script that can pass over a song takes the same flag — `tag_split_audio`, `fix_missing_mp3`, `prune_desynced_stems` and `find_missing_video` too. It pairs naturally with `--merge-variants`, where most sets are left alone by design — on the current library that's 838 lines of output down to 80, with all 10 acted-on sets still shown in full. In an `--interactive` run it has little to do: the prompt for a set is on screen before you decide to skip it.
 
   ```bash
-  uv run scripts/resolve_duplicate_songs.py --merge-variants --quiet
+  uv run scripts/resolve_duplicate_songs.py --merge-variants --terse
   ```
 
   **`--interactive`** confirms each set before touching it: `ENTER` accepts the recommended keeper, a number picks a different copy, `S` skips the set entirely. Each copy is listed with what it has going for it (`.usdb` date, split audio, video). It implies `--write`, since answering a prompt per set only to be told what *would* have happened is busywork — nothing changes without an explicit keypress. Running out of input (Ctrl-D) stops the run without applying anything further.
@@ -202,7 +202,7 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   `--details` reads the `.usdb` marker and reports the syncer's own verdict plus the source it was reaching for, e.g. `usdb#5942 audio=failure, video=skipped_unavailable [a=CfDOP7WrDpw]`. Like its video sibling it splits the problem three ways (`--category none|broken|untagged|all`): no audio *and* no video, `#MP3` naming a file that isn't there, or audio present that no chart declares. A folder holding only a video counts as having audio, since clients play the video's own track.
 
-- **`scripts/find_missing_video.py`** — reports songs with no usable background video, split into three separately-fixable problems: no video file at all, `#VIDEO` naming a file that isn't there, and a video sitting in the folder that no chart declares. `--write` fixes the third case by adding `#VIDEO` (only when the folder has exactly one video — it won't guess between several). `--usdb-only` narrows either script to folders with a `.usdb` marker, i.e. songs the syncer manages and could be asked to fetch again.
+- **`scripts/find_missing_video.py`** — reports songs with no usable background video, split into three separately-fixable problems: no video file at all, `#VIDEO` naming a file that isn't there, and a video sitting in the folder that no chart declares. `--write` fixes the third case by adding `#VIDEO` (only when the folder has exactly one video — it won't guess between several). Both media scripts print bare `<Artist> - <Title>` names, with `--full-paths` for full paths; `--usdb-only` narrows either to folders with a `.usdb` marker, i.e. songs the syncer manages and could be asked to fetch again.
 
   ```bash
   uv run scripts/find_missing_video.py > video-missing.txt   # default: songs with no video

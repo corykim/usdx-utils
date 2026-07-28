@@ -138,7 +138,7 @@ def ensure_tags(
 
 
 def process_song_dir(
-    song_dir: Path, songs_dir: Path, *, tolerance: float, write: bool
+    song_dir: Path, songs_dir: Path, *, tolerance: float, terse: bool, write: bool
 ) -> tuple[int, int, bool] | None:
     """Returns (charts_checked, charts_changed, stems_desynced), or None if
     this folder has no split audio to act on."""
@@ -176,8 +176,9 @@ def process_song_dir(
     # and say so. Nothing to compare against is not a mismatch.
     matches, explanation = audio_lengths.stems_match_mix(song_dir, tolerance)
     if matches is False:
-        print(f"skip (stems do not match the full mix): {song_dir.relative_to(songs_dir)}")
-        print(f"    {explanation}")
+        if not terse:
+            print(f"skip (stems do not match the full mix): {song_dir.relative_to(songs_dir)}")
+            print(f"    {explanation}")
         return len(charts), 0, True
 
     if accompaniment:
@@ -276,6 +277,12 @@ def main() -> int:
         "before it is left untagged (default: %(default)s).",
     )
     parser.add_argument(
+        "--terse",
+        action="store_true",
+        help="Say nothing about folders left untagged because their stems "
+        "disagree with the full mix; the closing count still reports them.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually modify files. Without this flag, only report what would change.",
@@ -305,7 +312,7 @@ def main() -> int:
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         result = process_song_dir(
-            song_dir, songs_dir, tolerance=args.tolerance, write=args.write
+            song_dir, songs_dir, tolerance=args.tolerance, terse=args.terse, write=args.write
         )
         if result is None:
             continue

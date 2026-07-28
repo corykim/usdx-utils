@@ -121,6 +121,11 @@ def main() -> int:
         help="Allowed difference in seconds between stem and full mix (default: 1.0)",
     )
     parser.add_argument(
+        "--terse",
+        action="store_true",
+        help="Say nothing about songs it skips; the closing counts still report them.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually delete stems and strip tags. Without this flag, only report.",
@@ -152,13 +157,15 @@ def main() -> int:
             (tag_value(read_text_preserving_encoding(c)[0], "MP3") or "").lower() in stem_names
             for c in charts
         ):
-            print(f"skip (#MP3 points at a stem): {song_dir.name}")
+            if not args.terse:
+                print(f"skip (#MP3 points at a stem): {song_dir.name}")
             mp3_is_stem += 1
             continue
 
         full_mix = audio_lengths.find_full_mix(song_dir)
         if full_mix is None:
-            print(f"skip (no full-mix audio to compare against): {song_dir.name}")
+            if not args.terse:
+                print(f"skip (no full-mix audio to compare against): {song_dir.name}")
             no_reference += 1
             continue
 
@@ -168,7 +175,8 @@ def main() -> int:
         stem_duration = audio_lengths.audio_duration(probe)
         mix_duration = audio_lengths.audio_duration(full_mix)
         if stem_duration is None or mix_duration is None:
-            print(f"skip (could not measure {probe.name} or {full_mix.name}): {song_dir.name}")
+            if not args.terse:
+                print(f"skip (could not measure {probe.name} or {full_mix.name}): {song_dir.name}")
             unmeasurable += 1
             continue
 

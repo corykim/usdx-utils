@@ -114,6 +114,11 @@ def main() -> int:
         help="Directory containing one song folder per subdirectory (default: ../songs)",
     )
     parser.add_argument(
+        "--terse",
+        action="store_true",
+        help="Say nothing about songs it skips; the closing counts still report them.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually modify chart files. Without this flag, only report what would change.",
@@ -139,7 +144,8 @@ def main() -> int:
             value = determine_mp3_value(song_dir)
             if value is None:
                 unresolved.append(chart)
-                print(f"skip (no video or instrumental.ogg): {chart.relative_to(songs_dir)}")
+                if not args.terse:
+                    print(f"skip (no video or instrumental.ogg): {chart.relative_to(songs_dir)}")
                 continue
 
             add_mp3_tag(chart, value, write=args.write)

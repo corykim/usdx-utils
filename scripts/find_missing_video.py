@@ -147,15 +147,20 @@ def main() -> int:
         "syncer manages and could be asked to fetch again.",
     )
     parser.add_argument(
-        "--names-only",
+        "--full-paths",
         action="store_true",
-        help="Print bare '<Artist> - <Title>' folder names instead of full paths.",
+        help="Print the full path to each folder instead of just its name.",
     )
     parser.add_argument(
         "--details",
         action="store_true",
         help="Append what the .usdb marker recorded: the syncer's status for "
         "video and audio, and the source it was reaching for.",
+    )
+    parser.add_argument(
+        "--terse",
+        action="store_true",
+        help="Say nothing about songs it skips; the closing counts still report them.",
     )
     parser.add_argument(
         "--write",
@@ -189,7 +194,7 @@ def main() -> int:
             for entry in song_dir.iterdir()
             if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS
         }
-        label = song_dir.name if args.names_only else str(song_dir)
+        label = str(song_dir) if args.full_paths else song_dir.name
         if args.details:
             label = f"{label}  --  {describe_fetch(song_dir)}"
 
@@ -200,7 +205,7 @@ def main() -> int:
         for chart in charts_in(song_dir):
             declared = video_tag_value(chart)
             chart_label = (
-                f"{song_dir.name}/{chart.name}" if args.names_only else str(chart)
+                str(chart) if args.full_paths else f"{song_dir.name}/{chart.name}"
             )
             if declared is None:
                 if args.write:
@@ -228,8 +233,9 @@ def main() -> int:
     if args.write:
         for entry in tagged:
             print(f"tagged: {entry}", file=sys.stderr)
-        for entry in ambiguous:
-            print(f"skipped: {entry}", file=sys.stderr)
+        if not args.terse:
+            for entry in ambiguous:
+                print(f"skipped: {entry}", file=sys.stderr)
 
     print(
         f"\nno video file: {len(no_video)}"
