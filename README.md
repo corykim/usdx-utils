@@ -138,7 +138,7 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/find_missing_video.py --write               # tag the untagged ones
   ```
 
-- **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one bare `<Artist> - <Title>` folder name per line (sorted) to stdout — the form songs are matched against USDB in — with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass a directory to scan somewhere other than `songs/`.
+- **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one folder per line (sorted) to stdout, with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass a directory to scan somewhere other than `songs/`, or `--names-only` for bare `<Artist> - <Title>` names instead of full paths.
 
   ```bash
   uv run scripts/find_missing_usdb.py > usdb-missing.txt
