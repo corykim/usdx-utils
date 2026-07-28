@@ -13,6 +13,13 @@ Three separate problems get counted, since they need different fixes:
   untagged  a video file is sitting in the folder but no chart declares
             #VIDEO, so UltraStar never plays it -- fixable in place
 
+"No video file" covers two different situations, and --details tells them
+apart by reading the .usdb marker: a "failure" status means a video was
+specified and the download did not get it, so it is worth asking for again,
+while "skipped_unavailable" means none was ever offered and there is nothing
+to re-fetch. The marker records how one fetch went rather than the state of
+the folder, so it is only meaningful read alongside what is actually there.
+
 Prints one entry per line, sorted, to stdout with a summary of all three on
 stderr, so it can be redirected straight to a file:
 
@@ -25,6 +32,7 @@ are skipped; they aren't songs.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -36,6 +44,38 @@ VIDEO_EXTENSIONS = frozenset({".mp4", ".webm", ".mkv", ".avi", ".mov", ".mpg", "
 # utf-8-sig decodes UTF-8 with or without a leading BOM and drops it. Charts
 # are always written back as plain UTF-8, so a BOM never survives an edit.
 TAG_ENCODINGS = ("utf-8-sig", "cp1252")
+
+
+def describe_fetch(directory: Path) -> str:
+    """What the syncer recorded about this song's media, for --details.
+
+    "failure" means a source was named and the download did not get it;
+    "skipped_unavailable" means none was named at all.
+    """
+    bits: list[str] = []
+    for marker in sorted(directory.glob("*.usdb")):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            bits.append(f"{marker.stem}: unreadable marker")
+            continue
+        statuses = ", ".join(
+            f"{part}={payload[part].get('status', '?')}"
+            for part in ("video", "audio")
+            if isinstance(payload.get(part), dict)
+        )
+        sources = {
+            key: value
+            for token in str(payload.get("meta_tags", "")).split(",")
+            if "=" in token
+            for key, value in [token.split("=", 1)]
+            if key in ("v", "a")
+        }
+        source = " ".join(f"{k}={v}" for k, v in sorted(sources.items()))
+        bits.append(
+            f"usdb#{payload.get('song_id', '?')} {statuses}" + (f" [{source}]" if source else "")
+        )
+    return "; ".join(bits) if bits else "no .usdb marker"
 
 
 def read_text_preserving_encoding(path: Path) -> tuple[str, str]:
@@ -112,6 +152,12 @@ def main() -> int:
         help="Print bare '<Artist> - <Title>' folder names instead of full paths.",
     )
     parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Append what the .usdb marker recorded: the syncer's status for "
+        "video and audio, and the source it was reaching for.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Fix the 'untagged' case by adding #VIDEO to charts whose folder "
@@ -144,6 +190,8 @@ def main() -> int:
             if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS
         }
         label = song_dir.name if args.names_only else str(song_dir)
+        if args.details:
+            label = f"{label}  --  {describe_fetch(song_dir)}"
 
         if not videos:
             no_video.append(label)
