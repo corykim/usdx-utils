@@ -133,6 +133,12 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   Where several variants qualify the file is copied to each and the original travels into `songs.replaced/` intact; with a single keeper it's moved as usual. Sets that would group even without the flag (`Don't` vs `Don’t`) are unaffected: they follow the ordinary newest-marker-wins rule, and their video transfers without the audio-length gate, since a music video's duration legitimately differs from the song's.
 
+  **`--quiet`** drops the report for any set that ends up untouched, printing only the ones something actually happened to. The tallies at the end are unchanged, so nothing goes unaccounted for. It pairs naturally with `--merge-variants`, where most sets are left alone by design — on the current library that's 838 lines of output down to 80, with all 10 acted-on sets still shown in full. In an `--interactive` run it has little to do: the prompt for a set is on screen before you decide to skip it.
+
+  ```bash
+  uv run scripts/resolve_duplicate_songs.py --merge-variants --quiet
+  ```
+
   **`--interactive`** confirms each set before touching it: `ENTER` accepts the recommended keeper, a number picks a different copy, `S` skips the set entirely. Each copy is listed with what it has going for it (`.usdb` date, split audio, video). It implies `--write`, since answering a prompt per set only to be told what *would* have happened is busywork — nothing changes without an explicit keypress. Running out of input (Ctrl-D) stops the run without applying anything further.
 
   When **every** copy in a set has a `.usdb` marker, `ENTER` defaults to *skip* instead. Two USDB-sourced folders are usually two entries somebody deliberately downloaded — a studio cut and a live one — rather than the same song fetched twice, so the safe answer is the easy one. Typing a number still merges them.

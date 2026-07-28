@@ -821,6 +821,12 @@ def main() -> int:
         "nothing is touched without your say-so anyway.",
     )
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Say nothing about sets that end up untouched -- useful with "
+        "--merge-variants, where most sets are left alone by design.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually move/modify files. Without this flag, only report what would change.",
@@ -857,7 +863,26 @@ def main() -> int:
         key=lambda members: members[0].name,
     )
 
+    # With --quiet a set's report is held back until it turns out to have
+    # done something. Interactive runs print as they go regardless, since a
+    # prompt the caller cannot see is no prompt at all.
+    buffered = args.quiet and not args.interactive
+    report: list[str] = []
+
+    def say(line: str = "") -> None:
+        if buffered:
+            report.append(line)
+        else:
+            print(line)
+
+    def flush(acted: bool) -> None:
+        if buffered and acted:
+            for line in report:
+                print(line)
+        report.clear()
+
     for members in groups:
+        report.clear()
         if len(members) == 1:
             # Only copy of this song. Nothing to reconcile, but drop a stray
             # " (N)" so it stops looking like a duplicate.
@@ -867,14 +892,16 @@ def main() -> int:
                 continue
             target = songs_dir / keeper_target
             if target.exists():
-                print(f"skip (songs/{keeper_target} already exists): {only.name}")
+                say(f"skip (songs/{keeper_target} already exists): {only.name}")
                 skipped += 1
+                flush(False)
                 continue
             verb = "renamed" if args.write else "would rename"
-            print(f"{verb}: songs/{only.name} -> songs/{keeper_target}")
+            say(f"{verb}: songs/{only.name} -> songs/{keeper_target}")
             if args.write:
                 only.rename(target)
             renamed += 1
+            flush(True)
             continue
 
         keeper, why = choose_keeper(members)
@@ -887,7 +914,7 @@ def main() -> int:
         variant_set = len({normalize_name(m.name) for m in members}) > 1
 
         if args.interactive:
-            print(f"\nduplicate ({len(members)} copies):")
+            say(f"\nduplicate ({len(members)} copies):")
             # A variant set whose copies all came from USDB is more likely
             # deliberate, distinct entries than one song downloaded twice, so
             # make the safe answer the easy one.
@@ -898,15 +925,16 @@ def main() -> int:
                 print("no more input; stopping here.", file=sys.stderr)
                 break
             if choice == "skip":
-                print("  skipped")
+                say("  skipped")
                 skipped += 1
+                flush(False)
                 continue
             keepers = [choice]
             why = "chosen interactively"
         else:
             # Names routinely contain commas, so separate them with something
             # that cannot be mistaken for part of one.
-            print(f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}")
+            say(f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}")
             if variant_set and marked:
                 # Each USDB-sourced variant is its own song -- a live cut is
                 # not a stale copy of the studio one -- so they all stay. Only
@@ -919,13 +947,15 @@ def main() -> int:
 
         retirees = [m for m in members if m not in keepers]
         for kept in keepers:
-            print(f"  keeping songs/{kept.name} -- {why}")
+            say(f"  keeping songs/{kept.name} -- {why}")
         if not retirees:
-            print("  nothing to retire")
+            say("  nothing to retire")
             skipped += 1
+            flush(False)
             continue
 
         any_marker = bool(marked)
+        acted = False
         for retired in retirees:
             retired_charts = charts_in(retired)
             # With several keepers an asset can be wanted by more than one, so
@@ -936,7 +966,7 @@ def main() -> int:
             for kept in keepers:
                 keeper_charts = charts_in(kept)
                 if len(keeper_charts) != 1 or len(retired_charts) != 1:
-                    print(
+                    say(
                         f"  note: songs/{kept.name} has {len(keeper_charts)} chart(s), "
                         f"songs/{retired.name} has {len(retired_charts)}; skipping metadata/asset merge"
                     )
@@ -946,14 +976,14 @@ def main() -> int:
                     retired, kept, retired_charts[0], keeper_charts[0], variant_set=variant_set
                 )
                 for message in asset_messages:
-                    print(f"  {message}")
+                    say(f"  {message}")
                     if message.startswith("PROBLEM"):
                         problems += 1
                 for _tag, filename, src in asset_plans:
                     if src is None:
                         continue  # already in the keeper folder, just needs the tag
                     verb = ("copied" if transfer is shutil.copy2 else "moved") if args.write else "would move"
-                    print(f"  {verb}: songs/{retired.name}/{filename} -> songs/{kept.name}/{filename}")
+                    say(f"  {verb}: songs/{retired.name}/{filename} -> songs/{kept.name}/{filename}")
                     if args.write:
                         transfer(str(src), str(kept / filename))
 
@@ -971,23 +1001,24 @@ def main() -> int:
                 )
                 if changes:
                     verb = "updated" if args.write else "would update"
-                    print(f"  {verb}: songs/{kept.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
+                    say(f"  {verb}: songs/{kept.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
 
             # Each .usdb marker stays with its own folder; the keepers are
             # already the bearers, so none need moving.
             destination = archive_destination(replaced_dir, retired)
             if destination is None:
-                print(f"  skip move (already archived under that name): {retired.name}")
+                say(f"  skip move (already archived under that name): {retired.name}")
                 skipped += 1
                 continue
 
             verb = "moved" if args.write else "would move"
-            print(f"  {verb}: songs/{retired.name} -> songs.replaced/{destination.name}")
+            say(f"  {verb}: songs/{retired.name} -> songs.replaced/{destination.name}")
             if args.write:
                 replaced_dir.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(retired), str(destination))
             vacated.add(retired)
             resolved += 1
+            acted = True
 
         # Survivors shed any " (N)" of their own, now that the copies they
         # were competing with have moved out of the way.
@@ -999,13 +1030,16 @@ def main() -> int:
             # In a dry run the copies "moved" out are still on disk, so a
             # target this run vacates does not count as occupied.
             if target.exists() and target not in vacated:
-                print(f"  skip rename (songs/{keeper_target} still exists): {kept.name}")
+                say(f"  skip rename (songs/{keeper_target} still exists): {kept.name}")
                 skipped += 1
             else:
                 verb = "renamed" if args.write else "would rename"
-                print(f"  {verb}: songs/{kept.name} -> songs/{keeper_target}")
+                say(f"  {verb}: songs/{kept.name} -> songs/{keeper_target}")
                 if args.write:
                     kept.rename(target)
+                acted = True
+
+        flush(acted)
 
     mode = "write" if args.write else "dry-run"
     print(
