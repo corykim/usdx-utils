@@ -5,3 +5,6 @@ tmp/
 usdb-missing.txt
 __pycache__/
 *.pyc
+
+# ffprobe result cache (see scripts/audio_lengths.py)
+.audio-lengths.json

@@ -18,6 +18,9 @@ runs and a plain `import audio_lengths` finds it.
 
 from __future__ import annotations
 
+import atexit
+import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -30,13 +33,82 @@ STEM_FILENAMES = frozenset({"vocals.ogg", "instrumental.ogg", "accompaniment.ogg
 # stems that came from a different rip entirely.
 DEFAULT_TOLERANCE_S = 1.0
 
-_duration_cache: dict[Path, float | None] = {}
+# Measuring a library's worth of audio takes minutes, and the answer only
+# changes when a file does, so it is kept between runs. Set
+# AUDIO_LENGTH_CACHE to move it, or to an empty value to measure every time.
+CACHE_PATH = Path(
+    os.environ.get(
+        "AUDIO_LENGTH_CACHE", Path(__file__).resolve().parent.parent / ".audio-lengths.json"
+    )
+)
+
+_durations: dict[str, float] | None = None
+_unsaved = False
+
+
+def _cache_key(path: Path) -> str | None:
+    """Identifies a file by where it is and how big it is, so replacing one
+    with a different recording invalidates the entry by itself. Returns None
+    when the file cannot be measured for size, leaving it uncacheable."""
+    try:
+        return f"{path.resolve()}|{path.stat().st_size}"
+    except OSError:
+        return None
+
+
+def _load() -> dict[str, float]:
+    global _durations
+    if _durations is None:
+        try:
+            stored = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+            _durations = {
+                key: float(value)
+                for key, value in stored.items()
+                if isinstance(value, (int, float))
+            }
+        except (OSError, ValueError, AttributeError):
+            # No cache yet, or one written by something else. Start over
+            # rather than fail: it is an optimization, not a source of truth.
+            _durations = {}
+    return _durations
+
+
+def _still_on_disk(key: str) -> bool:
+    """Whether a cached key still describes a file that is there, at that
+    size. Replacing a file leaves its old entry behind, so they are dropped
+    on the way out rather than accumulating for the life of the library."""
+    path, _, size = key.rpartition("|")
+    try:
+        return path and Path(path).stat().st_size == int(size)
+    except (OSError, ValueError):
+        return False
+
+
+def _save() -> None:
+    if not _unsaved or not _durations or not str(CACHE_PATH):
+        return
+    try:
+        live = {key: value for key, value in _durations.items() if _still_on_disk(key)}
+        # Write beside the target and swap, so a run interrupted mid-write
+        # cannot leave a truncated cache behind.
+        staged = CACHE_PATH.with_suffix(CACHE_PATH.suffix + ".partial")
+        staged.write_text(json.dumps(live, indent=0, sort_keys=True), encoding="utf-8")
+        staged.replace(CACHE_PATH)
+    except OSError:
+        pass  # a cache that cannot be written is not worth failing a run over
+
+
+atexit.register(_save)
 
 
 def audio_duration(path: Path) -> float | None:
     """Length in seconds via ffprobe, or None if it can't be determined."""
-    if path in _duration_cache:
-        return _duration_cache[path]
+    global _unsaved
+    cached = _load()
+    key = _cache_key(path)
+    if key is not None and key in cached:
+        return cached[key]
+
     result: float | None = None
     try:
         proc = subprocess.run(
@@ -57,7 +129,12 @@ def audio_duration(path: Path) -> float | None:
                 result = None
     except (OSError, subprocess.TimeoutExpired):
         result = None
-    _duration_cache[path] = result
+
+    # Only successes are kept. A failure may be a missing codec or a busy
+    # machine, and remembering it would make one bad run permanent.
+    if result is not None and key is not None:
+        cached[key] = result
+        _unsaved = True
     return result
 
 
