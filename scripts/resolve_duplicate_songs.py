@@ -84,6 +84,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 DUPLICATE_SUFFIX_RE = re.compile(r"^(?P<base>.+) \(\d+\)$")
 
+# Punctuation that survives name normalization -- see normalize_name().
+PRESERVED_PUNCTUATION = frozenset("()[]- ")
+
 # The only descriptive tags merged from the duplicate's chart into the base's.
 # Deliberately narrow: identity and timing tags are excluded, see docstring.
 MERGED_TAGS = {"LANGUAGE", "EDITION", "GENRE", "YEAR", "CREATOR"}
@@ -174,6 +177,21 @@ TAG_ENCODINGS = ("utf-8-sig", "cp1252")
 def base_name_for(dir_name: str) -> str | None:
     match = DUPLICATE_SUFFIX_RE.match(dir_name)
     return match.group("base") if match else None
+
+
+def normalize_name(name: str) -> str:
+    """Fold a folder name to what it is *about*, so two spellings of the same
+    song pair up: "The Police - Don't Stand So Close To Me" and the smart-quote
+    "Don’t" version, or "Wham! - Last Christmas" and "Wham - Last Christmas".
+
+    Case and punctuation are dropped; PRESERVED_PUNCTUATION is kept because
+    those characters carry meaning here -- " - " separates artist from title
+    and (…)/[…] mark variants like "(Live)" or "[DUET]", so folding them away
+    would let genuinely different songs collide. Runs of whitespace collapse
+    to one space, since removing punctuation can leave gaps behind.
+    """
+    kept = "".join(c for c in name.lower() if c.isalnum() or c in PRESERVED_PUNCTUATION)
+    return " ".join(kept.split())
 
 
 def usdb_stamp(directory: Path) -> tuple[int, int] | None:
@@ -422,25 +440,43 @@ def main() -> int:
     skipped = 0
     problems = 0
 
-    for dup_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
+    song_dirs = sorted(p for p in songs_dir.iterdir() if p.is_dir())
+
+    # Index the non-duplicate folders by normalized name, so a " (N)" folder
+    # finds its original even when the two disagree on punctuation or case.
+    by_normalized: dict[str, list[Path]] = {}
+    for song_dir in song_dirs:
+        if base_name_for(song_dir.name) is None:
+            by_normalized.setdefault(normalize_name(song_dir.name), []).append(song_dir)
+
+    for dup_dir in song_dirs:
         base_name = base_name_for(dup_dir.name)
         if base_name is None:
             continue
 
-        base_dir = songs_dir / base_name
-        if not base_dir.is_dir():
+        matches = by_normalized.get(normalize_name(base_name), [])
+        if len(matches) > 1:
+            names = ", ".join(sorted(m.name for m in matches))
+            print(f"skip (ambiguous -- could be any of: {names}): {dup_dir.name}")
+            skipped += 1
+            continue
+
+        if not matches:
             # Nothing to reconcile against -- this is the only copy, just
             # drop the " (N)" suffix so it stops looking like a duplicate.
-            if base_dir.exists():
+            target = songs_dir / base_name
+            if target.exists():
                 print(f"skip (songs/{base_name} exists but is not a directory): {dup_dir.name}")
                 skipped += 1
                 continue
             verb = "renamed" if args.write else "would rename"
             print(f"{verb}: songs/{dup_dir.name} -> songs/{base_name}")
             if args.write:
-                dup_dir.rename(base_dir)
+                dup_dir.rename(target)
             renamed += 1
             continue
+
+        base_dir = matches[0]
 
         # The USDB-sourced copy is the better version, so it's the one kept.
         # When both are USDB-sourced the newer entry wins; a tie, or neither
