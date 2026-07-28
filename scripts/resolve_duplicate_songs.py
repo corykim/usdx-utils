@@ -82,6 +82,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -96,6 +97,29 @@ TRAILING_COPY_NUMBER_RE = re.compile(r"\s*\(\s*\d+\s*\)\s*$")
 # A parenthesized phrase, e.g. the "(Live)" or "(Album Version)" that marks a
 # variant. Innermost-first, so repeated substitution unwraps nested groups.
 PARENTHESIZED_PHRASE_RE = re.compile(r"\([^()]*\)")
+
+# Letters that carry their decoration inside the glyph instead of as a separate
+# combining mark, so stripping marks alone would leave them untouched.
+UNDECOMPOSABLE_LETTERS = str.maketrans(
+    {
+        "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ł": "l", "Ł": "L",
+        "ð": "d", "Ð": "D", "þ": "th", "Þ": "Th", "ß": "ss", "ı": "i",
+        "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe", "ŉ": "n",
+    }
+)
+
+
+def fold_accents(text: str) -> str:
+    """Reduce decorated letters to their ASCII bases: "é" -> "e", "ñ" -> "n".
+
+    Decomposing splits a letter from its accent so the accent can be dropped;
+    recomposing afterwards puts back anything that legitimately lives as a
+    single character, which matters for Hangul -- decomposition scatters a
+    syllable into jamo, and those are letters in their own right, not marks.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.translate(UNDECOMPOSABLE_LETTERS))
+    without_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return unicodedata.normalize("NFC", without_marks)
 
 # The only descriptive tags merged from the duplicate's chart into the base's.
 # Deliberately narrow: identity and timing tags are excluded, see docstring.
@@ -202,6 +226,10 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     runs of whitespace collapse to a single space (stripping punctuation
     leaves gaps behind, and some folder names carry stray double spaces).
 
+    Accented and otherwise decorated letters fold to their ASCII bases, so
+    "Céline Dion" and "Celine Dion" are one artist and "Señorita" matches
+    "Senorita". Non-Latin scripts come through untouched.
+
     Punctuation is removed rather than turned into a space so initialisms
     survive: "Born In The U.S.A" and "Born in the USA" both land on "usa",
     as do "Y.M.C.A" and "YMCA". Words inside brackets are kept, so variant
@@ -213,7 +241,7 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     Version)" both collapse onto "song". Square brackets are untouched even
     then -- a [DUET] is a different chart, not a different mix of one.
     """
-    text = TRAILING_COPY_NUMBER_RE.sub("", name.lower())
+    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
     if merge_variants:
         while True:
             collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)

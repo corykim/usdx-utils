@@ -93,7 +93,9 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
 - **`scripts/resolve_duplicate_songs.py`** — finds song folders that are the same song stored more than once and reconciles each set. One copy becomes the **keeper**; the rest are retired into `songs.replaced/`. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
 
-  Folders are grouped by a **normalized** name, so copies pair up however they're spelled. Normalization strips a trailing `" (N)"` copy marker, removes all punctuation, folds case, and collapses runs of whitespace. Punctuation is *removed* rather than turned into a space so initialisms survive — `Born In The U.S.A` and `Born in the USA` both land on `usa`. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbie girl duet`, which isn't `barbie girl`.
+  Folders are grouped by a **normalized** name, so copies pair up however they're spelled. Normalization strips a trailing `" (N)"` copy marker, folds accented letters to their ASCII bases, removes all punctuation, folds case, and collapses runs of whitespace. Punctuation is *removed* rather than turned into a space so initialisms survive — `Born In The U.S.A` and `Born in the USA` both land on `usa`. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbie girl duet`, which isn't `barbie girl`.
+
+  Accent folding means `Beyonce` and `Beyoncé` are one artist, as are `Sinead O'Connor`/`Sinéad O’Connor` and `Jason Derulo`/`Jason Derülo`. Letters whose decoration is baked into the glyph rather than carried as a separate mark (`ø`, `æ`, `ß`, `ł`, …) are transliterated too. Non-Latin scripts pass through untouched — Hangul, Cyrillic and CJK titles are left exactly as they are.
 
   This means a re-download that merely re-punctuated the title is caught even when neither folder carries a `" (N)"` — `Bon Jovi - It's my life` and `Bon Jovi - It’s My Life` are one song, not two.
 
