@@ -703,9 +703,13 @@ def choose_keeper(members: list[Path]) -> tuple[Path, str]:
     prefers "Song" over "Song (Live)" -- then alphabetical, so the choice
     never depends on directory order."""
 
-    def rank(directory: Path) -> tuple[int, tuple[int, int], int, int]:
+    def rank(directory: Path) -> tuple[int, int, tuple[int, int], int, int]:
         stamp = usdb_stamp(directory)
         return (
+            # Above everything else: a copy with nothing to play cannot be the
+            # keeper while a playable one is on the table. Provenance is no
+            # use if the download never got the media.
+            1 if has_playable_media(directory) else 0,
             1 if stamp is not None else 0,
             stamp if stamp is not None else (0, 0),
             0 if base_name_for(directory.name) else 1,
@@ -716,6 +720,13 @@ def choose_keeper(members: list[Path]) -> tuple[Path, str]:
     # first copy on top whenever the ranks are equal.
     ordered = sorted(sorted(members, key=lambda d: d.name), key=rank, reverse=True)
     keeper = ordered[0]
+    playable = [m for m in members if has_playable_media(m)]
+    if playable and len(playable) < len(members):
+        # Playability settled it, so say that rather than quoting a marker
+        # date that did not actually decide anything.
+        unplayable = len(members) - len(playable)
+        return keeper, f"the other {unplayable} cop{'y has' if unplayable == 1 else 'ies have'} nothing to play"
+
     stamps = [usdb_stamp(m) for m in members]
     marked = [s for s in stamps if s is not None]
 
@@ -730,6 +741,16 @@ def choose_keeper(members: list[Path]) -> tuple[Path, str]:
         by_download = len({s[0] for s in marked}) == 1
         why = f"it has the newest .usdb marker ({describe_stamp(max(marked), by_download=by_download)})"
     return keeper, why
+
+
+def has_playable_media(directory: Path) -> bool:
+    """Whether this copy has anything a client could play -- a full mix, a
+    stem, or a video. A USDB download whose media failed has none of them."""
+    return any(
+        p.suffix.lower() in AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+        for p in directory.iterdir()
+        if p.is_file()
+    )
 
 
 def describe_copy(directory: Path) -> str:
@@ -836,6 +857,14 @@ def main() -> int:
         "nothing is touched without your say-so anyway.",
     )
     parser.add_argument(
+        "--include-unplayable",
+        action="store_true",
+        help="Also consider USDB-sourced copies whose media never downloaded. "
+        "They are left out by default, since they are shells awaiting a "
+        "re-fetch rather than copies of anything; with this flag they take "
+        "part, but a copy with nothing to play can never be the keeper.",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Say nothing about sets that end up untouched -- useful with "
@@ -868,11 +897,21 @@ def main() -> int:
 
     # Cluster folders holding the same song, however each is spelled, and
     # whether or not either carries a " (N)".
-    song_dirs = [
+    candidates = [
         p
         for p in sorted(songs_dir.iterdir())
         if p.is_dir() and not p.name.startswith(".")
     ]
+    # A USDB download whose media never arrived is an empty shell awaiting a
+    # re-fetch, not a copy of anything, so by default it sits the round out
+    # rather than being reconciled against a song that is actually playable.
+    if args.include_unplayable:
+        song_dirs, unplayable = candidates, []
+    else:
+        song_dirs = [
+            p for p in candidates if has_playable_media(p) or usdb_stamp(p) is None
+        ]
+        unplayable = [p for p in candidates if p not in song_dirs]
     groups = sorted(
         group_songs(song_dirs, merge_variants=args.merge_variants),
         key=lambda members: members[0].name,
@@ -957,6 +996,19 @@ def main() -> int:
                 # useful has been salvaged from them.
                 keepers = marked
                 why = "USDB-sourced variants are separate songs, so each is kept"
+                if not any(has_playable_media(k) for k in keepers):
+                    # Every marked variant is an empty shell. Retiring the one
+                    # copy that can actually be played to keep them would lose
+                    # the only usable audio, so it stays as well.
+                    rescued = [
+                        d for d in members if d not in keepers and has_playable_media(d)
+                    ]
+                    if rescued:
+                        keepers = keepers + rescued
+                        why = (
+                            "USDB-sourced variants are separate songs; the unmarked copy "
+                            "stays too, as it holds the only playable media"
+                        )
             else:
                 keepers = [keeper]
 
@@ -1057,6 +1109,12 @@ def main() -> int:
         flush(acted)
 
     mode = "write" if args.write else "dry-run"
+    if unplayable:
+        print(
+            f"\nleft alone: {len(unplayable)} USDB-sourced folder(s) whose media never "
+            f"downloaded -- re-fetch them, or pass --include-unplayable to reconcile "
+            f"them anyway (see find_missing_audio.py)"
+        )
     print(
         f"\n[{mode}] resolved: {resolved}, renamed: {renamed}, "
         f"skipped: {skipped}, problems: {problems}"

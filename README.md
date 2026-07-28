@@ -133,6 +133,8 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   Where several variants qualify the file is copied to each and the original travels into `songs.replaced/` intact; with a single keeper it's moved as usual. Sets that would group even without the flag (`Don't` vs `Don’t`) are unaffected: they follow the ordinary newest-marker-wins rule, and their video transfers without the audio-length gate, since a music video's duration legitimately differs from the song's.
 
+  **A USDB download whose media never arrived sits the round out.** Those folders hold a chart, artwork and a `.usdb` marker but nothing to play (see `find_missing_audio.py`); they're shells awaiting a re-fetch rather than copies of anything, so by default they aren't grouped, ranked or touched, and the run says how many it left alone. `--include-unplayable` brings them in — and when it does, a copy with nothing to play can never win the keeper slot, however good its marker, so the playable copy survives and the shell is retired.
+
   **`--quiet`** drops the report for any set that ends up untouched, printing only the ones something actually happened to. The tallies at the end are unchanged, so nothing goes unaccounted for. It pairs naturally with `--merge-variants`, where most sets are left alone by design — on the current library that's 838 lines of output down to 80, with all 10 acted-on sets still shown in full. In an `--interactive` run it has little to do: the prompt for a set is on screen before you decide to skip it.
 
   ```bash
