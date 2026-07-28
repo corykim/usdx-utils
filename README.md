@@ -184,7 +184,16 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   **Deletion cannot be undone** — `songs/` is gitignored, so there's no git history to restore from. This is why `fix_my_library.py` doesn't run it. It skips, and reports, any folder with no full-mix audio to compare against (a video is *not* used as the reference: music videos routinely carry extra footage, so their duration legitimately differs) and any folder whose `#MP3` points at a stem (deleting those would leave no audio at all). Since `fix_missing_mp3.py` creates exactly that kind of `#MP3` pointer for stems-only folders, run this *before* `fix_my_library.py` if you want those folders considered.
 
-- **`scripts/find_missing_video.py`** — reports songs with no usable background video, split into three separately-fixable problems: no video file at all, `#VIDEO` naming a file that isn't there, and a video sitting in the folder that no chart declares. `--write` fixes the third case by adding `#VIDEO` (only when the folder has exactly one video — it won't guess between several).
+- **`scripts/find_missing_audio.py`** — lists songs whose audio never arrived. A USDB download can fetch the chart and artwork but fail on the media when the source is geo-restricted or the API refuses it, leaving a folder that holds a chart, a cover, a background and a `.usdb` marker but nothing to play. Re-tagging can't fix those — there is no file for `#MP3` to point at — so they need the media fetching again.
+
+  ```bash
+  uv run scripts/find_missing_audio.py --details      # what the syncer recorded
+  uv run scripts/find_missing_audio.py --usdb-only    # only songs the syncer manages
+  ```
+
+  `--details` reads the `.usdb` marker and reports the syncer's own verdict plus the source it was reaching for, e.g. `usdb#5942 audio=failure, video=skipped_unavailable [a=CfDOP7WrDpw]`. Like its video sibling it splits the problem three ways (`--category none|broken|untagged|all`): no audio *and* no video, `#MP3` naming a file that isn't there, or audio present that no chart declares. A folder holding only a video counts as having audio, since clients play the video's own track.
+
+- **`scripts/find_missing_video.py`** — reports songs with no usable background video, split into three separately-fixable problems: no video file at all, `#VIDEO` naming a file that isn't there, and a video sitting in the folder that no chart declares. `--write` fixes the third case by adding `#VIDEO` (only when the folder has exactly one video — it won't guess between several). `--usdb-only` narrows either script to folders with a `.usdb` marker, i.e. songs the syncer manages and could be asked to fetch again.
 
   ```bash
   uv run scripts/find_missing_video.py > video-missing.txt   # default: songs with no video

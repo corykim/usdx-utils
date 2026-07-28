@@ -28,9 +28,9 @@ The sequence:
   6. find_missing_video   Declares #VIDEO for videos already sitting in a
                           folder untagged.
 
-Then it reports what still needs a human: songs with no video at all, and
-songs not yet cross-referenced against USDB (regenerating usdb-missing.txt
-when --write is given).
+Then it reports what still needs a human: songs whose audio never downloaded,
+songs with no video at all, and songs not yet cross-referenced against USDB
+(regenerating usdb-missing.txt when --write is given).
 
 Deliberately NOT included: prune_desynced_stems.py, which permanently deletes
 stem files. songs/ is gitignored, so that cannot be undone -- run it by hand
@@ -118,6 +118,13 @@ def main() -> int:
                 file=sys.stderr,
             )
             return code
+
+    print("\n----- report: songs with no audio at all -----")
+    sys.stdout.flush()
+    audio_argv = [sys.executable, str(SCRIPTS_DIR / "find_missing_audio.py")]
+    if args.songs_dir is not None:
+        audio_argv.append(str(args.songs_dir))
+    subprocess.run(audio_argv, stdout=subprocess.DEVNULL)
 
     print("\n----- report: songs still missing a video -----")
     sys.stdout.flush()

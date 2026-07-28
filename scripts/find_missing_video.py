@@ -101,6 +101,12 @@ def main() -> int:
         help="Which list to print (default: none -- folders with no video file at all)",
     )
     parser.add_argument(
+        "--usdb-only",
+        action="store_true",
+        help="Only consider folders that have a .usdb marker, i.e. songs the "
+        "syncer manages and could be asked to fetch again.",
+    )
+    parser.add_argument(
         "--names-only",
         action="store_true",
         help="Print bare '<Artist> - <Title>' folder names instead of full paths.",
@@ -123,9 +129,13 @@ def main() -> int:
     untagged: list[str] = []
     tagged: list[str] = []
     ambiguous: list[str] = []
+    skipped_unmanaged = 0
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         if song_dir.name.startswith("."):
+            continue
+        if args.usdb_only and not any(song_dir.glob("*.usdb")):
+            skipped_unmanaged += 1
             continue
 
         videos = {
@@ -179,6 +189,8 @@ def main() -> int:
         f" | video present but untagged: {len(untagged)}",
         file=sys.stderr,
     )
+    if args.usdb_only and skipped_unmanaged:
+        print(f"skipped {skipped_unmanaged} folder(s) with no .usdb marker", file=sys.stderr)
     if args.write:
         print(f"charts tagged: {len(tagged)}, skipped as ambiguous: {len(ambiguous)}", file=sys.stderr)
     elif untagged:
