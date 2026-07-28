@@ -95,6 +95,8 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   Folders are grouped by **billing and title**, matched separately because they follow different rules. The title has to agree exactly once normalized; the billing has to *describe the same act*, which means either naming exactly the same people in any order — `Lita Ford with Ozzy Osbourne` = `Ozzy Osbourne And Lita Ford` — or being the same lead plus guests: `Bob Marley & The Wailers` = `Bob Marley`, `Gotye feat. Kimbra` = `Gotye & Kimbra` = `Gotye`. A leading `The` is dropped, so `Bangles` = `The Bangles`.
 
+  A **parenthesized name in the billing counts as a performer**, not decoration, so `Disney's Frozen (Idina Menzel)` finds `Idina Menzel` and `Girls' Generation (SNSD)` finds `Girls' Generation`. Reading them rather than discarding them is what keeps `Disney's Moana (Alessia Cara)` away from `Disney's Moana (Auli'i Cravalho)` — two singers of one song, which stripping the parentheses would have merged.
+
   Sharing *a* name isn't enough, deliberately: `Michael Bublé feat. Mariah Carey - All I Want For Christmas` is a different recording from Mariah Carey's own, and Disney's two `Beauty and the Beast` duets (Céline Dion/Peabo Bryson vs Ariana Grande/John Legend) stay apart despite the shared franchise name.
 
   The title itself is normalized, in order:

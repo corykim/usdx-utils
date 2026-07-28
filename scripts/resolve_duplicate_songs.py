@@ -6,18 +6,26 @@
 """Find song folders that hold the same song more than once and reconcile
 each set down to a single copy.
 
-Copies are recognized by a normalized name: a trailing " (N)" copy marker is
-stripped, all punctuation is removed, case is folded, and runs of whitespace
-collapse. Punctuation is removed rather than turned into a space so
-initialisms survive ("Born In The U.S.A" and "Born in the USA" both give
-"usa"). Words inside square brackets remain, so "[DUET]" keeps a variant
-distinct. Two folders with the same normalized name are copies of one song --
-no " (N)" suffix required, which is what catches a re-download that merely
-re-punctuated the title ("Bon Jovi - It's my life" vs "It's My Life").
+Copies are recognized by billing and title, matched by different rules. No
+" (N)" suffix is required on either, which is what catches a re-download that
+merely rewrote the name ("Bon Jovi - It's my life" vs "It's My Life").
 
-With --merge-variants a parenthesized phrase is treated as noise instead of
-part of the title, so "Song (Live)" and "Song (Album Version)" collapse onto
-"Song" as well.
+The title has to agree exactly once normalized: a trailing " (N)" comes off,
+accents fold to ASCII, contractions expand, the noise words "and"/"the"/"a"
+go, and then punctuation, case and whitespace are stripped. Punctuation is
+removed rather than turned into a space so initialisms survive ("Born In The
+U.S.A" and "Born in the USA" both give "usa") and run-together band names
+match ("Big Bang" = "BIGBANG"). Words inside square brackets remain, so
+"[DUET]" keeps a variant distinct.
+
+The billing has to describe the same act -- see billings_match(). Parenthesized
+names count as performers rather than decoration, which both lets "Disney's
+Frozen (Idina Menzel)" find "Idina Menzel" and keeps "Disney's Moana (Alessia
+Cara)" away from "Disney's Moana (Auli'i Cravalho)".
+
+With --merge-variants a parenthesized phrase in the *title* is treated as
+noise, so "Song (Live)" and "Song (Album Version)" collapse onto "Song" as
+well.
 
 One copy is the "keeper"; the rest are retired into --replaced-dir. The
 USDB-sourced copy is the better version, so it wins:
@@ -136,19 +144,38 @@ ARTIST_SEPARATOR_RE = re.compile(
 )
 
 
-def artist_signature(artist: str) -> tuple[str, frozenset[str]]:
-    """The billing as (lead act, all acts), each squashed to bare characters.
+def strip_parenthesized(text: str) -> str:
+    """Remove parenthesized phrases, innermost first so nested groups unwrap."""
+    while True:
+        collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)
+        if collapsed == text:
+            return text
+        text = collapsed
 
-    Both halves are needed. The lead is what says "Bob Marley & The Wailers"
-    is still Bob Marley, while the full set is what lets "Lita Ford with Ozzy
-    Osbourne" and "Ozzy Osbourne And Lita Ford" line up despite the reversal.
+
+def artist_signature(artist: str) -> tuple[str, frozenset[str], frozenset[str]]:
+    """The billing as (lead act, all acts, acts named in parentheses).
+
+    A parenthesized name is a performer in their own right, not decoration:
+    "Disney's Frozen (Idina Menzel)" credits Idina Menzel, and "Girls'
+    Generation (SNSD)" gives that group's other name. Reading them as acts
+    rather than discarding them is what keeps "Disney's Moana (Alessia Cara)"
+    apart from "Disney's Moana (Auli'i Cravalho)" -- two singers of one song,
+    which stripping the parentheses would have merged.
     """
-    acts: list[str] = []
-    for act in ARTIST_SEPARATOR_RE.split(artist):
-        squashed = "".join(c for c in NOISE_WORD_RE.sub(" ", act) if c.isalnum())
-        if squashed and squashed not in acts:
-            acts.append(squashed)
-    return (acts[0] if acts else ""), frozenset(acts)
+
+    def acts_in(text: str) -> list[str]:
+        found = []
+        for act in ARTIST_SEPARATOR_RE.split(text):
+            squashed = "".join(c for c in NOISE_WORD_RE.sub(" ", act) if c.isalnum())
+            if squashed and squashed not in found:
+                found.append(squashed)
+        return found
+
+    inner = acts_in(" ".join(PARENTHESIZED_PHRASE_RE.findall(artist)))
+    outer = acts_in(strip_parenthesized(artist))
+    ordered = outer + [act for act in inner if act not in outer]
+    return (ordered[0] if ordered else ""), frozenset(ordered), frozenset(inner)
 
 
 def strip_featuring(text: str) -> str:
@@ -305,11 +332,7 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
     text = strip_featuring(text)
     if merge_variants:
-        while True:
-            collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)
-            if collapsed == text:
-                break
-            text = collapsed
+        text = strip_parenthesized(text)
     return "".join(c for c in NOISE_WORD_RE.sub(" ", text) if c.isalnum())
 
 
@@ -566,7 +589,7 @@ def merge_chart_metadata(
 
 def song_signature(
     name: str, *, merge_variants: bool = False
-) -> tuple[str, frozenset[str], str]:
+) -> tuple[str, frozenset[str], frozenset[str], str]:
     """Split a folder name into (lead act, all acts, normalized title).
 
     Title and billing match by different rules -- see billings_match() -- so
@@ -578,21 +601,17 @@ def song_signature(
     if not separator:
         # No "<artist> - <title>" shape, so there is nothing to bill; the whole
         # name has to match.
-        return "", frozenset(), normalize_name(name, merge_variants=merge_variants)
+        return "", frozenset(), frozenset(), normalize_name(name, merge_variants=merge_variants)
 
     if merge_variants:
-        while True:
-            collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", title)
-            if collapsed == title:
-                break
-            title = collapsed
+        title = strip_parenthesized(title)
     title_key = "".join(c for c in NOISE_WORD_RE.sub(" ", title) if c.isalnum())
-    lead, acts = artist_signature(artist)
-    return lead, acts, title_key
+    return artist_signature(artist) + (title_key,)
 
 
 def billings_match(
-    a: tuple[str, frozenset[str]], b: tuple[str, frozenset[str]]
+    a: tuple[str, frozenset[str], frozenset[str]],
+    b: tuple[str, frozenset[str], frozenset[str]],
 ) -> bool:
     """Whether two billings of one title are the same act.
 
@@ -609,12 +628,22 @@ def billings_match(
     the Celine Dion duet or the Ariana Grande one, and only the differing rest
     of the billing tells them apart.
     """
-    (lead_a, acts_a), (lead_b, acts_b) = a, b
+    (lead_a, acts_a, inner_a), (lead_b, acts_b, inner_b) = a, b
     if not acts_a or not acts_b:
         return True  # nothing billed on one side, so the title carries it
     if acts_a == acts_b:
         return True
-    return lead_a == lead_b and (acts_a < acts_b or acts_b < acts_a)
+    if not (acts_a < acts_b or acts_b < acts_a):
+        return False
+
+    if lead_a == lead_b:
+        return True
+    # The shorter billing may be the performer the longer one names in
+    # parentheses: "Idina Menzel" is who "Disney's Frozen (Idina Menzel)" is.
+    (short_lead, _, _), (_, _, long_inner) = (
+        (a, b) if len(acts_a) < len(acts_b) else (b, a)
+    )
+    return short_lead in long_inner
 
 
 def group_songs(
@@ -622,19 +651,22 @@ def group_songs(
 ) -> list[list[Path]]:
     """Cluster folders that hold the same song: identical title, and billings
     that billings_match()."""
-    by_title: dict[str, list[tuple[str, frozenset[str], Path]]] = {}
+    Billing = tuple[str, frozenset[str], frozenset[str]]
+    by_title: dict[str, list[tuple[Billing, Path]]] = {}
     for song_dir in song_dirs:
-        lead, acts, title = song_signature(song_dir.name, merge_variants=merge_variants)
-        by_title.setdefault(title, []).append((lead, acts, song_dir))
+        lead, acts, inner, title = song_signature(
+            song_dir.name, merge_variants=merge_variants
+        )
+        by_title.setdefault(title, []).append(((lead, acts, inner), song_dir))
 
     groups: list[list[Path]] = []
     for entries in by_title.values():
-        clusters: list[tuple[list[tuple[str, frozenset[str]]], list[Path]]] = []
-        for lead, acts, song_dir in entries:
+        clusters: list[tuple[list[Billing], list[Path]]] = []
+        for sig, song_dir in entries:
             # Transitive: a billing joins any cluster it matches, and merges
             # those clusters together if it matches several.
-            hits = [c for c in clusters if any(billings_match((lead, acts), b) for b in c[0])]
-            merged_billings = [(lead, acts)]
+            hits = [c for c in clusters if any(billings_match(sig, b) for b in c[0])]
+            merged_billings = [sig]
             merged_dirs = [song_dir]
             for cluster in hits:
                 merged_billings += cluster[0]
