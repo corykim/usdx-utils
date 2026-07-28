@@ -84,21 +84,34 @@ def _still_on_disk(key: str) -> bool:
         return False
 
 
-def _save() -> None:
+def _save(*, prune: bool = True) -> None:
+    global _unsaved
     if not _unsaved or not _durations or not str(CACHE_PATH):
         return
     try:
-        live = {key: value for key, value in _durations.items() if _still_on_disk(key)}
+        entries = _durations
+        if prune:
+            entries = {key: value for key, value in entries.items() if _still_on_disk(key)}
         # Write beside the target and swap, so a run interrupted mid-write
         # cannot leave a truncated cache behind.
         staged = CACHE_PATH.with_suffix(CACHE_PATH.suffix + ".partial")
-        staged.write_text(json.dumps(live, indent=0, sort_keys=True), encoding="utf-8")
+        staged.write_text(json.dumps(entries, indent=0, sort_keys=True), encoding="utf-8")
         staged.replace(CACHE_PATH)
+        _unsaved = False
     except OSError:
         pass  # a cache that cannot be written is not worth failing a run over
 
 
 atexit.register(_save)
+
+# Measuring a whole library takes long enough that someone will interrupt it,
+# so the cache is written as it fills rather than only at the end -- otherwise
+# a run stopped at minute nineteen would have nothing to show for it. Every
+# hundred misses, not every one: rewriting the file per probe would trade one
+# cost for another. Stale entries are only weeded out on the way out, to keep
+# these interim writes cheap.
+FLUSH_EVERY = 100
+_since_flush = 0
 
 
 def audio_duration(path: Path) -> float | None:
@@ -133,8 +146,13 @@ def audio_duration(path: Path) -> float | None:
     # Only successes are kept. A failure may be a missing codec or a busy
     # machine, and remembering it would make one bad run permanent.
     if result is not None and key is not None:
+        global _since_flush
         cached[key] = result
         _unsaved = True
+        _since_flush += 1
+        if _since_flush >= FLUSH_EVERY:
+            _since_flush = 0
+            _save(prune=False)
     return result
 
 
