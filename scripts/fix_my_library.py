@@ -66,7 +66,7 @@ class Step:
 STEPS = [
     Step("strip_bom.py", "Remove UTF-8 BOMs from charts"),
     Step("tag_split_audio.py", "Normalize split-audio filenames and tags"),
-    Step("resolve_duplicate_songs.py", "Reconcile '<name> (N)' duplicate folders"),
+    Step("resolve_duplicate_songs.py", "Reconcile folders holding the same song twice"),
     Step("tag_split_audio.py", "Re-normalize stems merged in by the previous step"),
     Step("fix_missing_mp3.py", "Backfill missing #MP3 tags"),
     Step("find_missing_video.py", "Declare #VIDEO for untagged videos", positional_songs_dir=True),

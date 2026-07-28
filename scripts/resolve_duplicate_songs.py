@@ -3,64 +3,70 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Resolve duplicate song folders (e.g. a re-download left behind a
-"<name> (1)" folder alongside the original "<name>" folder).
+"""Find song folders that hold the same song more than once and reconcile
+each set down to a single copy.
 
-A folder counts as a duplicate if its name ends in " (N)" for some number N
-and a sibling folder with the same base name (no suffix) also exists under
---songs-dir.
+Copies are recognized by a normalized name: a trailing " (N)" copy marker is
+stripped, all punctuation is removed, case is folded, and runs of whitespace
+collapse. Punctuation is removed rather than turned into a space so
+initialisms survive ("Born In The U.S.A" and "Born in the USA" both give
+"usa"). Words inside square brackets remain, so "[DUET]" keeps a variant
+distinct. Two folders with the same normalized name are copies of one song --
+no " (N)" suffix required, which is what catches a re-download that merely
+re-punctuated the title ("Bon Jovi - It's my life" vs "It's My Life").
 
-One of the two copies is the "keeper" and the other is retired into
---replaced-dir. The USDB-sourced copy is the better version, so it wins:
+With --merge-variants a parenthesized phrase is treated as noise instead of
+part of the title, so "Song (Live)" and "Song (Album Version)" collapse onto
+"Song" as well.
+
+One copy is the "keeper"; the rest are retired into --replaced-dir. The
+USDB-sourced copy is the better version, so it wins:
 
   * only one copy has a .usdb marker -> that copy keeps;
-  * both have one -> the newer entry keeps, ranked on the marker's own
+  * several have one -> the newest keeps, ranked on the marker's own
     "usdb_mtime" (when the entry was last revised upstream) and falling back
     to the marker file's mtime to separate two downloads of the same
-    unchanged entry. An exact tie leaves the original in place;
-  * neither has one -> the original base folder stays.
+    unchanged entry;
+  * none has one, or they tie -> the copy without a " (N)" marker stays.
 
-Whenever either copy is USDB-sourced the keeper is the authoritative one by
-construction, so its own chart metadata is left alone. Either way the keeper
-ends up named "<base>" in --songs-dir, so a flipped pair moves the old base
-out first and then renames the " (N)" folder into place.
+--interactive confirms each set instead: ENTER accepts the recommendation, a
+number picks a different copy, S skips the set.
 
-For each pair:
-  * assets the keeper is missing are moved over from the retired copy and the
-    corresponding tag set on the keeper's chart -- #COVER/#BACKGROUND/#VIDEO
-    plus #VOCALS/#INSTRUMENTAL, since a locally split vocals/instrumental
-    pair is worth preserving and fresh USDB downloads don't include one.
-    Split stems are picked up even if the retired chart never declared them,
-    by falling back to their conventional vocals.ogg/instrumental.ogg names.
-    An asset counts as missing if the keeper's chart doesn't declare that
-    tag, or declares it but the file it names isn't there; an asset the
-    keeper already has is never replaced. #MP3 is excluded -- the keeper's
-    note timings belong to the keeper's own full-mix audio;
-  * split stems are only merged if they're the same length (within
-    AUDIO_LENGTH_TOLERANCE_S) as the keeper's own audio, measured with
-    ffprobe. Stems are separated from a full mix, so a length mismatch means
-    they came from a different rip and would play offset against the
-    keeper's chart. Both stems come from one separation run, so a single
-    probe settles it for the pair. A keeper holding only a video counts as
-    having no audio, and its stems merge unchecked; a keeper with no audio
-    *and* no video falls back to using the merged instrumental as its #MP3;
-  * #LANGUAGE/#EDITION/#GENRE/#YEAR/#CREATOR are merged from the retired
-    chart into the keeper's, overwriting on conflict -- but only when neither
-    copy has a .usdb marker, since otherwise the keeper is the authoritative
-    one and its own metadata already wins. Identity tags (#VERSION/#TITLE/#ARTIST) shouldn't need
-    reconciling, and timing tags (#BPM/#GAP/#MEDLEYSTARTBEAT/#MEDLEYENDBEAT/
-    #START/#PREVIEWSTART/#VIDEOGAP/#END) are calibrated to that specific
-    chart's note-beat numbers -- overwriting one without rescaling every
-    note line would desync playback -- so both are always left alone.
+The normalized name is only ever used for grouping. The keeper's folder name
+is preserved exactly, except that a trailing " (N)" is stripped once the
+copies it was competing with have moved out of the way.
 
-Because the keeper is always the .usdb bearer whenever exactly one copy has a
-marker, markers never need moving; each stays with its own folder.
+From each retired copy the keeper takes:
+  * assets it is missing -- #COVER/#BACKGROUND/#VIDEO plus
+    #VOCALS/#INSTRUMENTAL, since a locally split vocals/instrumental pair is
+    worth preserving and fresh USDB downloads don't include one. Stems are
+    picked up even if the retired chart never declared them, by falling back
+    to their conventional vocals.ogg/instrumental.ogg names. An asset counts
+    as missing if the keeper's chart doesn't declare that tag, or declares it
+    but the file it names isn't there; an asset the keeper already has is
+    never replaced. #MP3 is excluded -- the keeper's note timings belong to
+    the keeper's own full-mix audio;
+  * split stems only when they match the keeper's own audio length (within
+    AUDIO_LENGTH_TOLERANCE_S, measured with ffprobe). Stems are separated
+    from a full mix, so a mismatch means they came from a different rip and
+    would play offset against the keeper's chart. Both stems come from one
+    separation run, so a single probe settles it. A keeper holding only a
+    video counts as having no audio and takes stems unchecked; a keeper with
+    no audio *and* no video falls back to using the merged instrumental as
+    its #MP3;
+  * #LANGUAGE/#EDITION/#GENRE/#YEAR/#CREATOR, overwriting on conflict -- but
+    only when no copy has a .usdb marker, since otherwise the keeper is
+    authoritative and its own metadata already wins. Identity tags
+    (#VERSION/#TITLE/#ARTIST) shouldn't need reconciling, and timing tags
+    (#BPM/#GAP/#MEDLEYSTARTBEAT/#MEDLEYENDBEAT/#START/#PREVIEWSTART/
+    #VIDEOGAP/#END) are calibrated to that chart's own note-beat numbers --
+    copying one without rescaling every note line would desync playback -- so
+    both are always left alone.
 
-A " (N)" folder with no matching base folder is really just the only copy of
-that song, so it's renamed in place to drop the suffix rather than being
-archived. If either folder has zero or more than one chart, the metadata and
-asset merges are skipped for that pair and reported (the folder moves still
-happen).
+Each .usdb marker stays with its own folder; the keeper is already the
+winning bearer, so none need moving. If the keeper or a retired copy has
+anything other than exactly one chart, the metadata and asset merges are
+skipped for that pair and reported (the folder moves still happen).
 
 Requires ffprobe (ffmpeg) on PATH for the stem length check.
 
@@ -86,6 +92,10 @@ for _stream in (sys.stdout, sys.stderr):
 # and to name the survivor, so the two can never disagree about what the
 # suffix is.
 TRAILING_COPY_NUMBER_RE = re.compile(r"\s*\(\s*\d+\s*\)\s*$")
+
+# A parenthesized phrase, e.g. the "(Live)" or "(Album Version)" that marks a
+# variant. Innermost-first, so repeated substitution unwraps nested groups.
+PARENTHESIZED_PHRASE_RE = re.compile(r"\([^()]*\)")
 
 # The only descriptive tags merged from the duplicate's chart into the base's.
 # Deliberately narrow: identity and timing tags are excluded, see docstring.
@@ -182,7 +192,7 @@ def base_name_for(dir_name: str) -> str | None:
     return stripped if stripped != dir_name else None
 
 
-def normalize_name(name: str) -> str:
+def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     """Fold a folder name to what it is *about*, so two spellings of the same
     song pair up: "The Police - Don't Stand So Close To Me" and the smart-quote
     "Don’t" version, or "Wham! - Last Christmas" and "Wham - Last Christmas".
@@ -197,9 +207,20 @@ def normalize_name(name: str) -> str:
     as do "Y.M.C.A" and "YMCA". Words inside brackets are kept, so variant
     markers still separate songs -- "Barbie Girl [DUET]" normalizes to
     "barbie girl duet", which is not "barbie girl".
+
+    With merge_variants, parenthesized phrases are dropped wholesale rather
+    than just losing their brackets, so "Song (Live)" and "Song (Album
+    Version)" both collapse onto "song". Square brackets are untouched even
+    then -- a [DUET] is a different chart, not a different mix of one.
     """
-    without_copy_number = TRAILING_COPY_NUMBER_RE.sub("", name.lower())
-    kept = "".join(c if c.isalnum() else " " if c.isspace() else "" for c in without_copy_number)
+    text = TRAILING_COPY_NUMBER_RE.sub("", name.lower())
+    if merge_variants:
+        while True:
+            collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)
+            if collapsed == text:
+                break
+            text = collapsed
+    kept = "".join(c if c.isalnum() else " " if c.isspace() else "" for c in text)
     return " ".join(kept.split())
 
 
@@ -417,35 +438,87 @@ def charts_in(directory: Path) -> list[Path]:
 
 def choose_keeper(members: list[Path]) -> tuple[Path, str]:
     """Pick which copy of a song survives, and explain why. USDB provenance
-    wins, then the newer entry; failing that the copy without a " (N)" copy
-    marker -- the original -- stays, with the name as a final tiebreak so the
-    choice never depends on directory order."""
+    wins, then the newer entry. Failing that the plainest name stays: no
+    " (N)" copy marker, then the shortest name -- which under --merge-variants
+    prefers "Song" over "Song (Live)" -- then alphabetical, so the choice
+    never depends on directory order."""
 
-    def rank(directory: Path) -> tuple[int, tuple[int, int], int, str]:
+    def rank(directory: Path) -> tuple[int, tuple[int, int], int, int]:
         stamp = usdb_stamp(directory)
         return (
             1 if stamp is not None else 0,
             stamp if stamp is not None else (0, 0),
             0 if base_name_for(directory.name) else 1,
-            directory.name,
+            -len(directory.name),
         )
 
-    ordered = sorted(members, key=rank, reverse=True)
+    # Sorting by name first and then stably by rank leaves the alphabetically
+    # first copy on top whenever the ranks are equal.
+    ordered = sorted(sorted(members, key=lambda d: d.name), key=rank, reverse=True)
     keeper = ordered[0]
     stamps = [usdb_stamp(m) for m in members]
     marked = [s for s in stamps if s is not None]
 
     if not marked:
-        why = "no copy has a .usdb marker, so the original stays"
+        why = "no copy has a .usdb marker, so the plainest name stays"
     elif len(marked) == 1:
         why = "it has the only .usdb marker"
     elif len(set(marked)) == 1:
-        why = f"every copy has the same .usdb marker ({describe_stamp(marked[0])}), so the original stays"
+        why = f"every copy has the same .usdb marker ({describe_stamp(marked[0])}), so the plainest name stays"
     else:
         # Equal upstream revisions mean the download date ranked them.
         by_download = len({s[0] for s in marked}) == 1
         why = f"it has the newest .usdb marker ({describe_stamp(max(marked), by_download=by_download)})"
     return keeper, why
+
+
+def describe_copy(directory: Path) -> str:
+    """One-line summary of what a copy has going for it, for the picker."""
+    stamp = usdb_stamp(directory)
+    bits = [describe_stamp(stamp) if stamp else "no .usdb marker"]
+    stems = sorted(
+        p.name for p in directory.iterdir() if p.is_file() and p.name.lower() in STEM_FILENAMES
+    )
+    if stems:
+        bits.append("split audio")
+    if any(p.suffix.lower() in VIDEO_EXTENSIONS for p in directory.iterdir() if p.is_file()):
+        bits.append("video")
+    return ", ".join(bits)
+
+
+def prompt_for_keeper(
+    members: list[Path], recommended: Path, why: str, *, default_skip: bool = False
+) -> Path | str:
+    """Ask which copy to keep. Returns the chosen folder, "skip" to leave the
+    group alone, or "abort" if input ran out. With default_skip, ENTER leaves
+    the set alone instead of accepting the recommendation."""
+    default = members.index(recommended) + 1
+    for number, member in enumerate(members, start=1):
+        marker = " " if default_skip else ("*" if member == recommended else " ")
+        print(f"  {marker} [{number}] {member.name}")
+        print(f"        {describe_copy(member)}")
+
+    if default_skip:
+        print("  every copy is USDB-sourced, so these are probably distinct entries")
+        prompt = f"  keep which? [ENTER=skip, number, S=skip]: "
+    else:
+        print(f"  recommended: [{default}] -- {why}")
+        prompt = f"  keep which? [ENTER={default}, number, S=skip]: "
+
+    while True:
+        try:
+            answer = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "abort"
+        if not answer:
+            return "skip" if default_skip else recommended
+        if answer.lower() == "s":
+            return "skip"
+        if answer.isdigit() and 1 <= int(answer) <= len(members):
+            return members[int(answer) - 1]
+        hint = "ENTER to skip" if default_skip else f"ENTER for {default}"
+        print(f"  enter 1-{len(members)}, {hint}, or S to skip")
 
 
 def archive_destination(replaced_dir: Path, retired: Path) -> Path | None:
@@ -461,7 +534,20 @@ def archive_destination(replaced_dir: Path, retired: Path) -> Path | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        # The module docstring is a page long; --help should stay scannable,
+        # so summarize and point at the source for the full rules.
+        description=(
+            "Reconcile song folders that hold the same song more than once, keeping one "
+            "copy and retiring the rest into --replaced-dir.\n\n"
+            "Copies are matched on a normalized name: a trailing \" (N)\" is stripped, "
+            "punctuation removed, case folded and whitespace collapsed -- so no \" (N)\" "
+            "suffix is needed to pair up two spellings of one title. The USDB-sourced "
+            "copy wins, newest first; its folder name is preserved exactly apart from "
+            "shedding a trailing \" (N)\".\n\n"
+            "Defaults to a dry run -- pass --write to apply. Needs ffprobe on PATH.\n"
+            "See the docstring at the top of this file for the full rules."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--songs-dir",
@@ -476,11 +562,31 @@ def main() -> int:
         help="Destination for retired duplicate folders (default: ../songs.replaced)",
     )
     parser.add_argument(
+        "--merge-variants",
+        action="store_true",
+        help="Treat a parenthesized phrase as noise rather than part of the title, so "
+        "'Song (Live)' and 'Song (Album Version)' count as copies of 'Song'. "
+        "Square brackets are still respected, so [DUET] stays a separate song.",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Confirm each set of copies: ENTER accepts the recommended keeper, a "
+        "number picks a different one, S skips the set. Implies --write, since "
+        "nothing is touched without your say-so anyway.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Actually move/modify files. Without this flag, only report what would change.",
     )
     args = parser.parse_args()
+
+    # Answering a prompt per group only to be told what would have happened
+    # is busywork, and every change still waits on an explicit keypress.
+    if args.interactive and not args.write:
+        args.write = True
+        print("--interactive implies --write; each set still waits for your confirmation.\n")
 
     songs_dir: Path = args.songs_dir
     replaced_dir: Path = args.replaced_dir
@@ -500,7 +606,8 @@ def main() -> int:
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         if song_dir.name.startswith("."):
             continue
-        groups.setdefault(normalize_name(song_dir.name), []).append(song_dir)
+        key = normalize_name(song_dir.name, merge_variants=args.merge_variants)
+        groups.setdefault(key, []).append(song_dir)
 
     for _key, members in sorted(groups.items()):
         if len(members) == 1:
@@ -523,14 +630,35 @@ def main() -> int:
             continue
 
         keeper, why = choose_keeper(members)
+
+        if args.interactive:
+            print(f"\nduplicate ({len(members)} copies):")
+            # If every copy came from USDB they are more likely deliberate,
+            # distinct entries than one song downloaded twice, so make the
+            # safe answer the easy one.
+            choice = prompt_for_keeper(
+                members,
+                keeper,
+                why,
+                default_skip=all(usdb_stamp(m) is not None for m in members),
+            )
+            if choice == "abort":
+                print("no more input; stopping here.", file=sys.stderr)
+                break
+            if choice == "skip":
+                print("  skipped")
+                skipped += 1
+                continue
+            keeper = choice
+            why = "chosen interactively"
+        else:
+            # Names routinely contain commas, so separate them with something
+            # that cannot be mistaken for part of one.
+            print(f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}")
+
         keeper_target = base_name_for(keeper.name) or keeper.name
         others = [m for m in members if m != keeper]
-        # Names routinely contain commas, so separate them with something that
-        # cannot be mistaken for part of one.
-        print(
-            f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}\n"
-            f"  keeping songs/{keeper.name} -- {why}"
-        )
+        print(f"  keeping songs/{keeper.name} -- {why}")
 
         keeper_charts = charts_in(keeper)
         any_marker = any(usdb_stamp(m) is not None for m in members)

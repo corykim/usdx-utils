@@ -99,6 +99,18 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   **The normalized form is only used for grouping; it is never written to disk.** The keeper's folder name is preserved exactly as it is, with one exception: a trailing `" (N)"` is stripped once the copies it was competing with have moved out of the way. So a keeper named `R.E.M. - What’s The Frequency, Kenneth! (1)` ends up as `R.E.M. - What’s The Frequency, Kenneth!` — every period, comma and curly quote intact.
 
+  **`--merge-variants`** additionally treats a parenthesized phrase as noise rather than part of the title, so `Song (Live)` and `Song (Album Version)` count as copies of `Song`. Square brackets are still respected, so `[DUET]` stays a separate song.
+
+  Be deliberate with this one: in a karaoke library a parenthetical is often a genuinely different chart, not a redundant copy. On the current library it groups 223 sets, and among them are `In Da Club` vs `(Explicit Version)`, `Jungle P` vs `(TV)` (a short TV edit), `Dirty Deeds Done Dirt Cheap` vs `(Live at Donington)`, and `Girlfriend` vs `(German)` — different lyrics, lengths, performances and languages. Pair it with `--interactive` rather than running it blind.
+
+  **`--interactive`** confirms each set before touching it: `ENTER` accepts the recommended keeper, a number picks a different copy, `S` skips the set entirely. Each copy is listed with what it has going for it (`.usdb` date, split audio, video). It implies `--write`, since answering a prompt per set only to be told what *would* have happened is busywork — nothing changes without an explicit keypress. Running out of input (Ctrl-D) stops the run without applying anything further.
+
+  When **every** copy in a set has a `.usdb` marker, `ENTER` defaults to *skip* instead. Two USDB-sourced folders are usually two entries somebody deliberately downloaded — a studio cut and a live one — rather than the same song fetched twice, so the safe answer is the easy one. Typing a number still merges them.
+
+  ```bash
+  uv run scripts/resolve_duplicate_songs.py --merge-variants --interactive
+  ```
+
   ```bash
   uv run scripts/resolve_duplicate_songs.py            # preview changes
   uv run scripts/resolve_duplicate_songs.py --write     # apply changes
