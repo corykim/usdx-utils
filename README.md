@@ -107,7 +107,7 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   | Fold accents to ASCII | `Beyoncé` → `beyonce`, `Señorita` → `senorita` |
   | Drop a featured-artist credit | `Eminem feat. Rihanna - Love The Way You Lie` → `Eminem - Love The Way You Lie` |
   | Drop `and`, `the`, `a` | `Hall and Oates` = `Hall & Oates`; `Bringin' On A Heartbreak` = `Bringin' On The Heartbreak` |
-  | Expand casual spellings | `Girls Just Wanna Have Fun` = `Girls Just Want To Have Fun`; `Don't Stop Believin'` = `Don't Stop Believing` |
+  | Expand casual spellings | `Wanna` = `Want To`; `Believin'` = `Believing`; `Till` = `'Til` = `Until` |
   | Remove punctuation, case and **all whitespace** | `B. B. King` → `bbking`, `Big Bang` → `bigbang` |
 
   Punctuation and spaces are *removed* rather than turned into separators, so `Born In The U.S.A` matches `Born in the USA`, `BIGBANG` matches `Big Bang`, `blink-182` matches `Blink 182`, and `Salt-N-Pepa` matches `Salt N' Pepa`. `and` goes because the `&` it stands in for is punctuation and drops out anyway; the articles go because they drift between one filing and the next. All three are matched on word boundaries, leaving `The Band`, `Andy Williams`, `Theory Of A Deadman`, `Bananarama` and `Thelma Houston` alone. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbiegirlduet`, which isn't `barbiegirl`.

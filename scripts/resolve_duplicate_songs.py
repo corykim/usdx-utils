@@ -130,11 +130,15 @@ ARTIST_TITLE_SEPARATOR = " - "
 # Word-bounded, or these would eat into "Band", "There" and "Baby".
 NOISE_WORD_RE = re.compile(r"\b(?:and|the|a)\b")
 
-# Contractions a title may or may not spell out -- "Girls Just Wanna Have Fun"
-# and "Girls Just Want To Have Fun" are one song. Expanded to the long form,
-# which then loses its space along with everything else.
-CONTRACTIONS = {"wanna": "want to"}
-CONTRACTION_RE = re.compile(r"\b(?:%s)\b" % "|".join(CONTRACTIONS))
+# Words a title may or may not spell out -- "Girls Just Wanna Have Fun" and
+# "Girls Just Want To Have Fun" are one song, as are "No Sleep Till Brooklyn"
+# and "...Until Brooklyn". Each is written out in full, which then loses its
+# space along with everything else.
+CONTRACTIONS = {"wanna": "want to", "till": "until", "til": "until"}
+# Longest first, so "till" is not matched as "til" with a stray letter left.
+CONTRACTION_RE = re.compile(
+    r"\b(?:%s)\b" % "|".join(sorted(CONTRACTIONS, key=len, reverse=True))
+)
 
 # A dropped final "g": "Don't Stop Believin'" is "Believing", "Stayin' Alive"
 # is "Staying Alive". The apostrophe has to end the word -- without that
