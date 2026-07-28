@@ -85,7 +85,10 @@ for _stream in (sys.stdout, sys.stderr):
 DUPLICATE_SUFFIX_RE = re.compile(r"^(?P<base>.+) \(\d+\)$")
 
 # Punctuation that survives name normalization -- see normalize_name().
-PRESERVED_PUNCTUATION = frozenset("()[]- ")
+PRESERVED_PUNCTUATION = frozenset("[]- ")
+
+# The " (N)" a re-download leaves on a folder name, removed before matching.
+TRAILING_COPY_NUMBER_RE = re.compile(r"\s*\(\s*\d+\s*\)\s*$")
 
 # The only descriptive tags merged from the duplicate's chart into the base's.
 # Deliberately narrow: identity and timing tags are excluded, see docstring.
@@ -184,13 +187,18 @@ def normalize_name(name: str) -> str:
     song pair up: "The Police - Don't Stand So Close To Me" and the smart-quote
     "Don’t" version, or "Wham! - Last Christmas" and "Wham - Last Christmas".
 
-    Case and punctuation are dropped; PRESERVED_PUNCTUATION is kept because
-    those characters carry meaning here -- " - " separates artist from title
-    and (…)/[…] mark variants like "(Live)" or "[DUET]", so folding them away
-    would let genuinely different songs collide. Runs of whitespace collapse
-    to one space, since removing punctuation can leave gaps behind.
+    A trailing " (N)" is a re-download marker rather than part of the title,
+    so it comes off first; any remaining parentheses lose their brackets but
+    keep their words, so "Don’t You (Forget About Me)" lines up with "Don't
+    You Forget About Me". Case and the rest of the punctuation are dropped
+    too, except " - ", which separates artist from title, and […], which
+    marks variants like "[DUET]". Runs of whitespace collapse to one space,
+    since removing punctuation can leave gaps behind.
     """
-    kept = "".join(c for c in name.lower() if c.isalnum() or c in PRESERVED_PUNCTUATION)
+    without_copy_number = TRAILING_COPY_NUMBER_RE.sub("", name.lower())
+    kept = "".join(
+        c for c in without_copy_number if c.isalnum() or c in PRESERVED_PUNCTUATION
+    )
     return " ".join(kept.split())
 
 

@@ -91,7 +91,9 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/fix_missing_mp3.py --write     # apply changes
   ```
 
-- **`scripts/resolve_duplicate_songs.py`** — finds song folders whose name ends in `" (N)"` (left behind by a re-download alongside the original folder) and reconciles each pair. One copy becomes the **keeper** and the other is retired into `songs.replaced/`; the keeper always ends up named plainly, without the suffix. A `" (N)"` folder with no matching base folder is just the only copy of that song, so it's renamed in place. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
+- **`scripts/resolve_duplicate_songs.py`** — finds song folders whose name ends in `" (N)"` (left behind by a re-download alongside the original folder) and reconciles each pair. One copy becomes the **keeper** and the other is retired into `songs.replaced/`; the keeper always ends up named plainly, without the suffix. A `" (N)"` folder with no matching original is just the only copy of that song, so it's renamed in place. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
+
+  Folders are paired up on a **normalized** name, so a re-download that changed the punctuation still finds its original. A trailing `" (N)"` comes off first, then remaining parentheses lose their brackets but keep their words, then case and the rest of the punctuation go — leaving `" - "` (artist/title separator) and `[…]` (variant markers like `[DUET]`) intact so genuinely different songs don't collide. So `Don’t You (Forget About Me) (1)` pairs with `Don't You Forget About Me`, while `Barbie Girl [DUET]` stays separate from `Barbie Girl`. If a duplicate's normalized name matches more than one folder it's skipped and reported rather than guessed at.
 
   ```bash
   uv run scripts/resolve_duplicate_songs.py            # preview changes
