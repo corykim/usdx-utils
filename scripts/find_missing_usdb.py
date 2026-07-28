@@ -6,10 +6,13 @@
 """List song folders that have no <youtube-id>.usdb provenance marker, i.e.
 songs not yet cross-referenced against USDB (usdb.animux.de).
 
-Prints one folder per line, sorted, to stdout -- redirect it to refresh
+Prints one bare "<Artist> - <Title>" folder name per line, sorted, to stdout
+-- the form songs are matched against USDB in -- so redirecting it refreshes
 usdb-missing.txt:
 
     uv run scripts/find_missing_usdb.py > usdb-missing.txt
+
+Pass --full-paths for the full path to each folder instead.
 
 Dot-directories (e.g. a stray songs/.claude) are skipped; they aren't songs.
 """
@@ -37,9 +40,9 @@ def main() -> int:
         help="Directory containing one song folder per subdirectory (default: ../songs)",
     )
     parser.add_argument(
-        "--names-only",
+        "--full-paths",
         action="store_true",
-        help="Print bare '<Artist> - <Title>' folder names instead of full paths.",
+        help="Print the full path to each folder instead of just its name.",
     )
     args = parser.parse_args()
 
@@ -55,7 +58,7 @@ def main() -> int:
     ]
 
     for song_dir in missing:
-        print(song_dir.name if args.names_only else song_dir)
+        print(song_dir if args.full_paths else song_dir.name)
 
     print(f"\n{len(missing)} song folder(s) with no .usdb marker", file=sys.stderr)
     return 0
