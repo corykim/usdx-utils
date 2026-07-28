@@ -294,12 +294,23 @@ def parse_header_tags(lines: list[str]) -> dict[str, tuple[int, str]]:
 
 
 def plan_asset_merges(
-    src_dir: Path, dst_dir: Path, src_chart: Path, dst_chart: Path
+    src_dir: Path,
+    dst_dir: Path,
+    src_chart: Path,
+    dst_chart: Path,
+    *,
+    variant_set: bool = False,
 ) -> tuple[list[tuple[str, str, Path | None]], list[str]]:
     """Find ASSET_TAGS assets dst_dir is missing but src_dir has. Returns
     (plans, messages), where each plan is (tag, filename, source path to move
     -- or None if a file of that name is already sitting in dst_dir
-    untagged)."""
+    untagged).
+
+    With variant_set the two copies are different cuts of a song rather than
+    two writings of one name, so the video only transfers when the two
+    full-mix audio files are the same length. Unless that lines up these are
+    separate recordings, and a live backdrop does not belong on the studio
+    chart."""
     src_text, _ = read_text_preserving_encoding(src_chart)
     src_tags = parse_header_tags(src_text.splitlines())
     dst_text, _ = read_text_preserving_encoding(dst_chart)
@@ -315,6 +326,17 @@ def plan_asset_merges(
             # Untagged split audio still counts -- preserving the stems matters
             # more than whether the source chart bothered to declare them.
             value = CONVENTIONAL_ASSET_NAMES.get(tag, "")
+        if not value and tag == "VIDEO":
+            # A video has no conventional filename to fall back on, so take
+            # the folder's own -- but only when there is exactly one, since
+            # anything else would be guessing which is the real backdrop.
+            videos = [
+                p
+                for p in sorted(src_dir.iterdir())
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+            ]
+            if len(videos) == 1:
+                value = videos[0].name
         if not value:
             return None
         candidate = src_dir / value
@@ -324,6 +346,25 @@ def plan_asset_merges(
     # keeper's own audio length they're from a different rip and would play out
     # of sync against the keeper's chart. Both stems come out of the same
     # separation run, so one probe settles it for the pair.
+    # For a variant set, matching full-mix lengths are what say these two are
+    # the same recording -- and so whether the video belongs on the keeper.
+    video_allowed = True
+    if variant_set:
+        src_audio, _ = classify_audio(src_dir, src_tags)
+        src_duration = audio_duration(src_audio) if src_audio else None
+        if src_duration is None or dst_audio_duration is None:
+            video_allowed = False
+            messages.append(
+                "skip video: cannot compare audio length between these variants, "
+                "so they are not established as the same recording"
+            )
+        elif abs(src_duration - dst_audio_duration) > AUDIO_LENGTH_TOLERANCE_S:
+            video_allowed = False
+            messages.append(
+                f"skip video: audio {src_duration:.1f}s vs keeper {dst_audio_duration:.1f}s "
+                f"-- a different recording, so its video does not belong here"
+            )
+
     stems_match = True
     if dst_audio is not None:
         probe = resolve_src("INSTRUMENTAL") or resolve_src("VOCALS")
@@ -353,6 +394,8 @@ def plan_asset_merges(
                 continue  # keeper already has this asset; never replace it
 
         if tag in SPLIT_AUDIO_TAGS and not stems_match:
+            continue
+        if tag == "VIDEO" and not video_allowed:
             continue
 
         dest = dst_dir / src.name
@@ -630,17 +673,21 @@ def main() -> int:
             continue
 
         keeper, why = choose_keeper(members)
+        marked = [m for m in members if usdb_stamp(m) is not None]
+
+        # Whether this set only holds together because --merge-variants threw
+        # away a parenthesized phrase. If the names still agree without that,
+        # they are plain restatements of one title ("Don't" vs "Don’t") and
+        # the ordinary rules apply.
+        variant_set = len({normalize_name(m.name) for m in members}) > 1
 
         if args.interactive:
             print(f"\nduplicate ({len(members)} copies):")
-            # If every copy came from USDB they are more likely deliberate,
-            # distinct entries than one song downloaded twice, so make the
-            # safe answer the easy one.
+            # A variant set whose copies all came from USDB is more likely
+            # deliberate, distinct entries than one song downloaded twice, so
+            # make the safe answer the easy one.
             choice = prompt_for_keeper(
-                members,
-                keeper,
-                why,
-                default_skip=all(usdb_stamp(m) is not None for m in members),
+                members, keeper, why, default_skip=variant_set and len(marked) == len(members)
             )
             if choice == "abort":
                 print("no more input; stopping here.", file=sys.stderr)
@@ -649,25 +696,49 @@ def main() -> int:
                 print("  skipped")
                 skipped += 1
                 continue
-            keeper = choice
+            keepers = [choice]
             why = "chosen interactively"
         else:
             # Names routinely contain commas, so separate them with something
             # that cannot be mistaken for part of one.
             print(f"\nduplicate ({len(members)} copies): {' | '.join(m.name for m in members)}")
+            if variant_set and marked:
+                # Each USDB-sourced variant is its own song -- a live cut is
+                # not a stale copy of the studio one -- so they all stay. Only
+                # copies with no provenance are retired, after anything
+                # useful has been salvaged from them.
+                keepers = marked
+                why = "USDB-sourced variants are separate songs, so each is kept"
+            else:
+                keepers = [keeper]
 
-        keeper_target = base_name_for(keeper.name) or keeper.name
-        others = [m for m in members if m != keeper]
-        print(f"  keeping songs/{keeper.name} -- {why}")
+        retirees = [m for m in members if m not in keepers]
+        for kept in keepers:
+            print(f"  keeping songs/{kept.name} -- {why}")
+        if not retirees:
+            print("  nothing to retire")
+            skipped += 1
+            continue
 
-        keeper_charts = charts_in(keeper)
-        any_marker = any(usdb_stamp(m) is not None for m in members)
-
-        for retired in others:
+        any_marker = bool(marked)
+        for retired in retirees:
             retired_charts = charts_in(retired)
-            if len(keeper_charts) == 1 and len(retired_charts) == 1:
+            # With several keepers an asset can be wanted by more than one, so
+            # copy it around and let the original travel into the archive;
+            # with a single keeper move it, as before.
+            transfer = shutil.copy2 if len(keepers) > 1 else shutil.move
+
+            for kept in keepers:
+                keeper_charts = charts_in(kept)
+                if len(keeper_charts) != 1 or len(retired_charts) != 1:
+                    print(
+                        f"  note: songs/{kept.name} has {len(keeper_charts)} chart(s), "
+                        f"songs/{retired.name} has {len(retired_charts)}; skipping metadata/asset merge"
+                    )
+                    continue
+
                 asset_plans, asset_messages = plan_asset_merges(
-                    retired, keeper, retired_charts[0], keeper_charts[0]
+                    retired, kept, retired_charts[0], keeper_charts[0], variant_set=variant_set
                 )
                 for message in asset_messages:
                     print(f"  {message}")
@@ -676,34 +747,29 @@ def main() -> int:
                 for _tag, filename, src in asset_plans:
                     if src is None:
                         continue  # already in the keeper folder, just needs the tag
-                    verb = "moved" if args.write else "would move"
-                    print(f"  {verb}: songs/{retired.name}/{filename} -> songs/{keeper.name}/{filename}")
+                    verb = ("copied" if transfer is shutil.copy2 else "moved") if args.write else "would move"
+                    print(f"  {verb}: songs/{retired.name}/{filename} -> songs/{kept.name}/{filename}")
                     if args.write:
-                        shutil.move(str(src), str(keeper / filename))
+                        transfer(str(src), str(kept / filename))
 
                 changes = merge_chart_metadata(
                     retired_charts[0],
                     keeper_charts[0],
-                    # Whenever any copy is USDB-sourced the keeper is the
-                    # authoritative one by construction, so its own metadata
-                    # wins and only missing assets get pulled across. With no
-                    # marker anywhere there's no authority, so the other
-                    # copy's descriptive tags are merged in.
+                    # Whenever any copy is USDB-sourced the keepers are the
+                    # authoritative ones by construction, so their own
+                    # metadata wins and only missing assets get pulled across.
+                    # With no marker anywhere there's no authority, so the
+                    # other copy's descriptive tags are merged in.
                     descriptive=not any_marker,
                     extra_tags={tag: filename for tag, filename, _ in asset_plans},
                     write=args.write,
                 )
                 if changes:
                     verb = "updated" if args.write else "would update"
-                    print(f"  {verb}: songs/{keeper.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
-            else:
-                print(
-                    f"  note: songs/{keeper.name} has {len(keeper_charts)} chart(s), "
-                    f"songs/{retired.name} has {len(retired_charts)}; skipping metadata/asset merge"
-                )
+                    print(f"  {verb}: songs/{kept.name}/{keeper_charts[0].name} -> {'; '.join(changes)}")
 
-            # Each .usdb marker stays with its own folder; the keeper is
-            # already the winning bearer, so none need moving.
+            # Each .usdb marker stays with its own folder; the keepers are
+            # already the bearers, so none need moving.
             destination = archive_destination(replaced_dir, retired)
             if destination is None:
                 print(f"  skip move (already archived under that name): {retired.name}")
@@ -718,20 +784,23 @@ def main() -> int:
             vacated.add(retired)
             resolved += 1
 
-        # The survivor sheds any " (N)" of its own, now that the copies it
-        # was competing with have moved out of the way.
-        if keeper.name != keeper_target:
+        # Survivors shed any " (N)" of their own, now that the copies they
+        # were competing with have moved out of the way.
+        for kept in keepers:
+            keeper_target = base_name_for(kept.name)
+            if keeper_target is None:
+                continue
             target = songs_dir / keeper_target
             # In a dry run the copies "moved" out are still on disk, so a
             # target this run vacates does not count as occupied.
             if target.exists() and target not in vacated:
-                print(f"  skip rename (songs/{keeper_target} still exists): {keeper.name}")
+                print(f"  skip rename (songs/{keeper_target} still exists): {kept.name}")
                 skipped += 1
             else:
                 verb = "renamed" if args.write else "would rename"
-                print(f"  {verb}: songs/{keeper.name} -> songs/{keeper_target}")
+                print(f"  {verb}: songs/{kept.name} -> songs/{keeper_target}")
                 if args.write:
-                    keeper.rename(target)
+                    kept.rename(target)
 
     mode = "write" if args.write else "dry-run"
     print(

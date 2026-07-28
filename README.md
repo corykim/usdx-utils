@@ -101,7 +101,16 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   **`--merge-variants`** additionally treats a parenthesized phrase as noise rather than part of the title, so `Song (Live)` and `Song (Album Version)` count as copies of `Song`. Square brackets are still respected, so `[DUET]` stays a separate song.
 
-  Be deliberate with this one: in a karaoke library a parenthetical is often a genuinely different chart, not a redundant copy. On the current library it groups 223 sets, and among them are `In Da Club` vs `(Explicit Version)`, `Jungle P` vs `(TV)` (a short TV edit), `Dirty Deeds Done Dirt Cheap` vs `(Live at Donington)`, and `Girlfriend` vs `(German)` — different lyrics, lengths, performances and languages. Pair it with `--interactive` rather than running it blind.
+  Be deliberate with this one: in a karaoke library a parenthetical is often a genuinely different chart, not a redundant copy. On the current library it groups 223 sets, and among them are `In Da Club` vs `(Explicit Version)`, `Jungle P` vs `(TV)` (a short TV edit), `Dirty Deeds Done Dirt Cheap` vs `(Live at Donington)`, and `Girlfriend` vs `(German)` — different lyrics, lengths, performances and languages.
+
+  So in a set that only holds together *because* a parenthetical was discarded, **every USDB-sourced copy is kept** — a live cut is its own song, not a stale copy of the studio one. Only copies with no `.usdb` marker are retired, and only after anything useful has been salvaged from them. A set where all copies carry a marker therefore has nothing to retire and is left alone (134 of the 223 sets here); the remaining 59 give up a single unsourced folder each.
+
+  What gets salvaged from a retired copy is decided per surviving variant, by length:
+
+  - **stems** transfer to a variant whose own audio is the same length (the usual rule);
+  - **video** transfers only to a variant whose audio is the same length — for a variant set that equality is the evidence the two are the same recording, and a live backdrop doesn't belong on the studio chart.
+
+  Where several variants qualify the file is copied to each and the original travels into `songs.replaced/` intact; with a single keeper it's moved as usual. Sets that would group even without the flag (`Don't` vs `Don’t`) are unaffected: they follow the ordinary newest-marker-wins rule, and their video transfers without the audio-length gate, since a music video's duration legitimately differs from the song's.
 
   **`--interactive`** confirms each set before touching it: `ENTER` accepts the recommended keeper, a number picks a different copy, `S` skips the set entirely. Each copy is listed with what it has going for it (`.usdb` date, split audio, video). It implies `--write`, since answering a prompt per set only to be told what *would* have happened is busywork — nothing changes without an explicit keypress. Running out of input (Ctrl-D) stops the run without applying anything further.
 
