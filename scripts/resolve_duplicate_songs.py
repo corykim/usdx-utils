@@ -109,6 +109,24 @@ UNDECOMPOSABLE_LETTERS = str.maketrans(
 )
 
 
+# A "feat." / "ft" / "featuring" credit and everything after it. Only ever
+# applied to the artist half of a name, so a title that happens to mention a
+# feature -- "Creep (Gamper & Dadoni feat. Ember Island Remix)" -- is safe.
+FEATURING_RE = re.compile(r"\s+(?:featuring|feat|ft)\b\.?\s+.*$")
+
+ARTIST_TITLE_SEPARATOR = " - "
+
+
+def strip_featuring(text: str) -> str:
+    """Drop a featured-artist credit from the artist half of "<artist> -
+    <title>", so "Beyonce feat. Jay-Z - Crazy In Love" lines up with the same
+    song filed without the guest."""
+    artist, separator, title = text.partition(ARTIST_TITLE_SEPARATOR)
+    if not separator:
+        return text
+    return FEATURING_RE.sub("", artist) + separator + title
+
+
 def fold_accents(text: str) -> str:
     """Reduce decorated letters to their ASCII bases: "é" -> "e", "ñ" -> "n".
 
@@ -230,6 +248,11 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     "Céline Dion" and "Celine Dion" are one artist and "Señorita" matches
     "Senorita". Non-Latin scripts come through untouched.
 
+    A featured-artist credit is dropped from the artist half, so "Beyonce
+    feat. Jay-Z - Crazy In Love" matches the same song filed without the
+    guest. Only the artist half is touched, leaving a title that mentions a
+    feature intact.
+
     Punctuation is removed rather than turned into a space so initialisms
     survive: "Born In The U.S.A" and "Born in the USA" both land on "usa",
     as do "Y.M.C.A" and "YMCA". Words inside brackets are kept, so variant
@@ -241,15 +264,14 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     Version)" both collapse onto "song". Square brackets are untouched even
     then -- a [DUET] is a different chart, not a different mix of one.
     """
-    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
+    text = strip_featuring(fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower())))
     if merge_variants:
         while True:
             collapsed = PARENTHESIZED_PHRASE_RE.sub(" ", text)
             if collapsed == text:
                 break
             text = collapsed
-    kept = "".join(c if c.isalnum() else " " if c.isspace() else "" for c in text)
-    return " ".join(kept.split())
+    return "".join(c for c in text if c.isalnum())
 
 
 def usdb_stamp(directory: Path) -> tuple[int, int] | None:
