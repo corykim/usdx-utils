@@ -116,10 +116,11 @@ FEATURING_RE = re.compile(r"\s+(?:featuring|feat|ft)\b\.?\s+.*$")
 
 ARTIST_TITLE_SEPARATOR = " - "
 
-# A spelled-out "and". The ampersand it stands in for is punctuation and drops
-# out on its own, so removing the word too puts "Hall & Oates" and "Hall and
-# Oates" on the same footing. Word-bounded, or it would eat into "Band".
-AND_WORD_RE = re.compile(r"\band\b")
+# Words that carry no identity and so are dropped before matching: "and",
+# because the "&" it stands in for is punctuation and vanishes anyway, and the
+# articles, which come and go between one filing of a song and the next.
+# Word-bounded, or these would eat into "Band", "There" and "Baby".
+NOISE_WORD_RE = re.compile(r"\b(?:and|the|a)\b")
 
 # Contractions a title may or may not spell out -- "Girls Just Wanna Have Fun"
 # and "Girls Just Want To Have Fun" are one song. Expanded to the long form,
@@ -134,9 +135,6 @@ ARTIST_SEPARATOR_RE = re.compile(
     r"\s*(?:&|\+|,|/|\bwith\b|\band\b|\bfeaturing\b|\bfeat\b\.?|\bft\b\.?)\s*"
 )
 
-# A leading article on a band name: "The Bangles" is the "Bangles".
-LEADING_ARTICLE_RE = re.compile(r"^the\s+")
-
 
 def artist_signature(artist: str) -> tuple[str, frozenset[str]]:
     """The billing as (lead act, all acts), each squashed to bare characters.
@@ -147,7 +145,7 @@ def artist_signature(artist: str) -> tuple[str, frozenset[str]]:
     """
     acts: list[str] = []
     for act in ARTIST_SEPARATOR_RE.split(artist):
-        squashed = "".join(c for c in LEADING_ARTICLE_RE.sub("", act.strip()) if c.isalnum())
+        squashed = "".join(c for c in NOISE_WORD_RE.sub(" ", act) if c.isalnum())
         if squashed and squashed not in acts:
             acts.append(squashed)
     return (acts[0] if acts else ""), frozenset(acts)
@@ -312,7 +310,7 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
             if collapsed == text:
                 break
             text = collapsed
-    return "".join(c for c in AND_WORD_RE.sub(" ", text) if c.isalnum())
+    return "".join(c for c in NOISE_WORD_RE.sub(" ", text) if c.isalnum())
 
 
 def usdb_stamp(directory: Path) -> tuple[int, int] | None:
@@ -588,7 +586,7 @@ def song_signature(
             if collapsed == title:
                 break
             title = collapsed
-    title_key = "".join(c for c in AND_WORD_RE.sub(" ", title) if c.isalnum())
+    title_key = "".join(c for c in NOISE_WORD_RE.sub(" ", title) if c.isalnum())
     lead, acts = artist_signature(artist)
     return lead, acts, title_key
 
