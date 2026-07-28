@@ -28,6 +28,9 @@ The sequence:
   6. find_missing_video   Declares #VIDEO for videos already sitting in a
                           folder untagged.
 
+--quiet is handed on to the steps that understand it, so they report only
+what they actually changed.
+
 Then it reports what still needs a human: songs whose audio never downloaded,
 songs with no video at all, and songs not yet cross-referenced against USDB
 (regenerating usdb-missing.txt when --write is given).
@@ -60,24 +63,33 @@ class Step:
     summary: str
     # find_missing_*.py take the songs dir positionally; the rest use --songs-dir.
     positional_songs_dir: bool = False
+    # Only some steps have anything to hold back, and passing --quiet to one
+    # that doesn't understand it would abort the run on an unknown argument.
+    accepts_quiet: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
 STEPS = [
     Step("strip_bom.py", "Remove UTF-8 BOMs from charts"),
     Step("tag_split_audio.py", "Normalize split-audio filenames and tags"),
-    Step("resolve_duplicate_songs.py", "Reconcile folders holding the same song twice"),
+    Step(
+        "resolve_duplicate_songs.py",
+        "Reconcile folders holding the same song twice",
+        accepts_quiet=True,
+    ),
     Step("tag_split_audio.py", "Re-normalize stems merged in by the previous step"),
     Step("fix_missing_mp3.py", "Backfill missing #MP3 tags"),
     Step("find_missing_video.py", "Declare #VIDEO for untagged videos", positional_songs_dir=True),
 ]
 
 
-def run_step(step: Step, songs_dir: Path | None, *, write: bool) -> int:
+def run_step(step: Step, songs_dir: Path | None, *, quiet: bool, write: bool) -> int:
     argv = [sys.executable, str(SCRIPTS_DIR / step.script)]
     if songs_dir is not None:
         argv += [str(songs_dir)] if step.positional_songs_dir else ["--songs-dir", str(songs_dir)]
     argv += step.extra_args
+    if quiet and step.accepts_quiet:
+        argv.append("--quiet")
     if write:
         argv.append("--write")
     # Children inherit the console and write to it directly, so flush our own
@@ -99,6 +111,12 @@ def main() -> int:
         help="Override the songs directory (default: each script's own ../songs)",
     )
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Pass --quiet on to the steps that understand it, so they report "
+        "only what they actually changed.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Apply changes. Without this flag every step runs as a dry run.",
@@ -110,7 +128,7 @@ def main() -> int:
 
     for number, step in enumerate(STEPS, start=1):
         print(f"\n----- step {number}/{len(STEPS)}: {step.script} -- {step.summary} -----")
-        code = run_step(step, args.songs_dir, write=args.write)
+        code = run_step(step, args.songs_dir, quiet=args.quiet, write=args.write)
         if code != 0:
             print(
                 f"\nstep {number} ({step.script}) exited {code}; stopping so a "

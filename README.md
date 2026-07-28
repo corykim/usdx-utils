@@ -63,7 +63,10 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   ```bash
   uv run scripts/fix_my_library.py            # preview everything
   uv run scripts/fix_my_library.py --write    # apply everything
+  uv run scripts/fix_my_library.py --quiet    # only report what changed
   ```
+
+  `--quiet` is handed on to the steps that understand it, and only those — a step that doesn't would abort the run on an unknown argument.
 
   The sequence is `strip_bom` → `tag_split_audio` → `resolve_duplicate_songs` → `tag_split_audio` again → `fix_missing_mp3` → `find_missing_video`. BOMs go first because one makes a header line invisible to every other tool here; duplicate resolution comes before the per-folder fixes because it moves whole folders around; and stem tagging runs on both sides of it so duplicate resolution can find split audio by its conventional name, and so anything it merges in under a non-standard name still gets normalized. The second tagging pass is idempotent and normally a no-op — in a *dry run* it reports the same counts as the first only because nothing was actually applied in between.
 
