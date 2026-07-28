@@ -100,9 +100,10 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   | Strip a trailing `" (N)"` | `Song (1)` → `Song` |
   | Fold accents to ASCII | `Beyoncé` → `beyonce`, `Señorita` → `senorita` |
   | Drop a featured-artist credit | `Eminem feat. Rihanna - Love The Way You Lie` → `Eminem - Love The Way You Lie` |
+  | Drop a spelled-out `and` | `Hall and Oates` → `Hall & Oates` |
   | Remove punctuation, case and **all whitespace** | `B. B. King` → `bbking`, `Big Bang` → `bigbang` |
 
-  Punctuation and spaces are *removed* rather than turned into separators, so `Born In The U.S.A` matches `Born in the USA`, `BIGBANG` matches `Big Bang`, `blink-182` matches `Blink 182`, and `Salt-N-Pepa` matches `Salt N' Pepa`. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbiegirlduet`, which isn't `barbiegirl`.
+  Punctuation and spaces are *removed* rather than turned into separators, so `Born In The U.S.A` matches `Born in the USA`, `BIGBANG` matches `Big Bang`, `blink-182` matches `Blink 182`, and `Salt-N-Pepa` matches `Salt N' Pepa`. The `&` that `and` stands in for is punctuation and drops out anyway, so removing the word too puts the two spellings on the same footing — it's matched on word boundaries, leaving `The Band`, `Andy Williams` and `Randy Travis` alone. Words inside brackets stay, so variant markers still separate songs: `Barbie Girl [DUET]` normalizes to `barbiegirlduet`, which isn't `barbiegirl`.
 
   The featuring credit is only stripped from the **artist** half, so a title that mentions one survives — `Radiohead - Creep (Gamper & Dadoni feat. Ember Island Remix)` keeps its remix credit. Non-Latin scripts pass through untouched: Hangul, Cyrillic and CJK titles are left exactly as they are.
 

@@ -116,6 +116,11 @@ FEATURING_RE = re.compile(r"\s+(?:featuring|feat|ft)\b\.?\s+.*$")
 
 ARTIST_TITLE_SEPARATOR = " - "
 
+# A spelled-out "and". The ampersand it stands in for is punctuation and drops
+# out on its own, so removing the word too puts "Hall & Oates" and "Hall and
+# Oates" on the same footing. Word-bounded, or it would eat into "Band".
+AND_WORD_RE = re.compile(r"\band\b")
+
 
 def strip_featuring(text: str) -> str:
     """Drop a featured-artist credit from the artist half of "<artist> -
@@ -253,6 +258,9 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     guest. Only the artist half is touched, leaving a title that mentions a
     feature intact.
 
+    A spelled-out "and" goes too, so it agrees with the "&" it stands in for:
+    "Hall & Oates" and "Hall and Oates" are one artist.
+
     Punctuation is removed rather than turned into a space so initialisms
     survive: "Born In The U.S.A" and "Born in the USA" both land on "usa",
     as do "Y.M.C.A" and "YMCA". Words inside brackets are kept, so variant
@@ -271,7 +279,7 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
             if collapsed == text:
                 break
             text = collapsed
-    return "".join(c for c in text if c.isalnum())
+    return "".join(c for c in AND_WORD_RE.sub(" ", text) if c.isalnum())
 
 
 def usdb_stamp(directory: Path) -> tuple[int, int] | None:
