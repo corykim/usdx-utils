@@ -136,6 +136,19 @@ NOISE_WORD_RE = re.compile(r"\b(?:and|the|a)\b")
 CONTRACTIONS = {"wanna": "want to"}
 CONTRACTION_RE = re.compile(r"\b(?:%s)\b" % "|".join(CONTRACTIONS))
 
+# A dropped final "g": "Don't Stop Believin'" is "Believing", "Stayin' Alive"
+# is "Staying Alive". The apostrophe has to end the word -- without that
+# guard "Ain't" and "Dolphin's" would be caught as well.
+DROPPED_G_RE = re.compile(r"in['’´`](?!\w)")
+
+
+def expand_informal(text: str) -> str:
+    """Spell out what a title may have written casually, so the two spellings
+    agree: "wanna" as "want to", "-in'" as "-ing"."""
+    text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
+    return DROPPED_G_RE.sub("ing", text)
+
+
 # What separates one artist from the next in a billing. Splitting on these
 # rather than discarding what follows means a guest still counts as an artist,
 # which is what lets a differently-ordered billing line up.
@@ -328,8 +341,7 @@ def normalize_name(name: str, *, merge_variants: bool = False) -> str:
     Version)" both collapse onto "song". Square brackets are untouched even
     then -- a [DUET] is a different chart, not a different mix of one.
     """
-    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
-    text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
+    text = expand_informal(fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower())))
     text = strip_featuring(text)
     if merge_variants:
         text = strip_parenthesized(text)
@@ -595,8 +607,7 @@ def song_signature(
     Title and billing match by different rules -- see billings_match() -- so
     they are kept apart rather than mashed into one key.
     """
-    text = fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower()))
-    text = CONTRACTION_RE.sub(lambda mo: CONTRACTIONS[mo.group(0)], text)
+    text = expand_informal(fold_accents(TRAILING_COPY_NUMBER_RE.sub("", name.lower())))
     artist, separator, title = text.partition(ARTIST_TITLE_SEPARATOR)
     if not separator:
         # No "<artist> - <title>" shape, so there is nothing to bill; the whole
