@@ -13,20 +13,22 @@ Three separate problems get counted, since they need different fixes:
   untagged  a video file is sitting in the folder but no chart declares
             #VIDEO, so UltraStar never plays it -- fixable in place
 
-"No video file" covers two different situations, and --details tells them
-apart by reading the .usdb marker: a "failure" status means a video was
+"No video file" covers two different situations, split further by
+--category into two of their own: a "failure" status means a video was
 specified and the download did not get it, so it is worth asking for again,
 while "skipped_unavailable" means none was ever offered and there is nothing
 to re-fetch. The marker records how one fetch went rather than the state of
 the folder, so it is only meaningful read alongside what is actually there.
 
-Prints one entry per line, sorted, to stdout with a summary of all three on
+Prints one entry per line, sorted, to stdout with a summary of all five on
 stderr, so it can be redirected straight to a file:
 
     uv run scripts/find_missing_video.py > video-missing.txt
 
---category picks which list goes to stdout (default: none). Dot-directories
-are skipped; they aren't songs.
+--category picks which list goes to stdout (default: none). skipped-unavailable
+and download-failed are the .usdb-marker-driven breakdown of "none" above --
+their counts are a subset of it, not additional songs. Dot-directories are
+skipped; they aren't songs.
 """
 
 from __future__ import annotations
@@ -76,6 +78,25 @@ def describe_fetch(directory: Path) -> str:
             f"usdb#{payload.get('song_id', '?')} {statuses}" + (f" [{source}]" if source else "")
         )
     return "; ".join(bits) if bits else "no .usdb marker"
+
+
+def usdb_video_status(directory: Path) -> str | None:
+    """The .usdb marker's video.status for this folder, or None.
+
+    A folder can in principle carry more than one marker (e.g. mid-merge);
+    the first one with a readable video status wins, since categorization
+    only needs one answer per folder, unlike --details which lists all of
+    them.
+    """
+    for marker in sorted(directory.glob("*.usdb")):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        video = payload.get("video")
+        if isinstance(video, dict) and video.get("status"):
+            return str(video["status"])
+    return None
 
 
 def read_text_preserving_encoding(path: Path) -> tuple[str, str]:
@@ -136,9 +157,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--category",
-        choices=("none", "broken", "untagged", "all"),
+        choices=(
+            "none",
+            "broken",
+            "untagged",
+            "all",
+            "skipped-unavailable",
+            "download-failed",
+        ),
         default="none",
-        help="Which list to print (default: none -- folders with no video file at all)",
+        help="Which list to print (default: none -- folders with no video file at "
+        "all). skipped-unavailable and download-failed are the .usdb-marker "
+        "breakdown of *why* -- both are subsets of 'none', not additional songs.",
     )
     parser.add_argument(
         "--usdb-only",
@@ -180,6 +210,8 @@ def main() -> int:
     untagged: list[str] = []
     tagged: list[str] = []
     ambiguous: list[str] = []
+    skipped_unavailable: list[str] = []
+    download_failed: list[str] = []
     skipped_unmanaged = 0
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
@@ -200,6 +232,11 @@ def main() -> int:
 
         if not videos:
             no_video.append(label)
+            status = usdb_video_status(song_dir)
+            if status == "skipped_unavailable":
+                skipped_unavailable.append(label)
+            elif status in ("failure", "failure_existing"):
+                download_failed.append(label)
             continue
 
         for chart in charts_in(song_dir):
@@ -226,6 +263,8 @@ def main() -> int:
         "broken": broken,
         "untagged": untagged,
         "all": no_video + broken + untagged,
+        "skipped-unavailable": skipped_unavailable,
+        "download-failed": download_failed,
     }[args.category]
     for entry in listing:
         print(entry)
@@ -237,10 +276,18 @@ def main() -> int:
             for entry in ambiguous:
                 print(f"skipped: {entry}", file=sys.stderr)
 
+    other_no_video = len(no_video) - len(skipped_unavailable) - len(download_failed)
     print(
         f"\nno video file: {len(no_video)}"
         f" | #VIDEO names a missing file: {len(broken)}"
         f" | video present but untagged: {len(untagged)}",
+        file=sys.stderr,
+    )
+    print(
+        f"  of the {len(no_video)} with no video file: "
+        f"{len(skipped_unavailable)} never offered by USDB, "
+        f"{len(download_failed)} download failed, "
+        f"{other_no_video} other (no marker, or not usdb-managed)",
         file=sys.stderr,
     )
     if args.usdb_only and skipped_unmanaged:

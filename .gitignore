@@ -3,6 +3,7 @@ songs.replaced/
 songs.bad/
 tmp/
 usdb-missing.txt
+usdb-uploads/
 __pycache__/
 *.pyc
 
