@@ -35,7 +35,7 @@ import argparse
 import sys
 from pathlib import Path
 
-import audio_lengths
+from utils import audio_lengths
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -195,6 +195,12 @@ def main() -> int:
             print(f"  {verb}: {stem.name}")
             if args.write:
                 stem.unlink()
+                # Drop the measurement with the file. The cache is keyed by
+                # path and size, so a stem regenerated later at a different
+                # length would miss the stale entry anyway -- but one that
+                # happened to come back the same size would hit it, and the
+                # entry would be describing a file this run destroyed.
+                audio_lengths.forget(stem)
         for chart in charts:
             removed = strip_stem_tags(chart, write=args.write)
             for tag_line in removed:

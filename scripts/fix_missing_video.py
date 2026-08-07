@@ -5,9 +5,9 @@
 # ///
 """Fix one song's missing video: download it and tag the chart(s).
 
-Takes a USDB song id (matched against the folder's own .usdb marker, same
-id find_missing_video.py --details prints) and a YouTube URL or bare video
-id, downloads video-only (UltraStar plays a background video muted -- the
+Takes the song -- as a folder path, a bare folder name, or a USDB song id
+matched against the folder's own .usdb marker -- and a YouTube URL or bare
+video id, downloads video-only (UltraStar plays a background video muted -- the
 real audio comes from #MP3/vocals+instrumental, so an audio track would
 just be wasted bandwidth and a second, unwanted source of sound), and adds
 #VIDEO to every chart in that folder that doesn't already declare one.
@@ -23,7 +23,13 @@ legitimately runs a different length than the song (same convention as
 resolve_duplicate_songs.py and find_missing_video.py).
 
     uv run scripts/fix_missing_video.py 7456 https://www.youtube.com/watch?v=mh4CgxITgbE
-    uv run scripts/fix_missing_video.py 7456 mh4CgxITgbE --write
+    uv run scripts/fix_missing_video.py "38 Special - Hold On Loosely" mh4CgxITgbE
+    uv run scripts/fix_missing_video.py "./songs/38 Special - Hold On Loosely/" mh4CgxITgbE --write
+
+The id was the only accepted form to begin with, which was awkward: the
+find_missing_* scripts that tell you a video is missing print bare folder
+names, so using their output meant opening the .usdb marker to look the
+number up. A name or a path is taken directly now.
 
 Defaults to a dry run; --write applies it. If the folder already has a
 video file, this refuses to add another without --force. Charts that
@@ -44,10 +50,12 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from find_missing_video import (  # noqa: E402
     VIDEO_EXTENSIONS,
-    add_video_tag,
     charts_in,
+    header_end_index,
+    read_text_preserving_encoding,
     video_tag_value,
 )
+from utils import song_folders  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -82,17 +90,62 @@ def parse_youtube_id(text: str) -> str:
     return candidate
 
 
-def find_song_folder(songs_dir: Path, song_id: int) -> list[Path]:
-    """Folders whose .usdb marker matches this USDB song id."""
-    matches = []
-    for marker in songs_dir.glob("*/*.usdb"):
-        try:
-            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
-            continue
-        if payload.get("song_id") == song_id:
-            matches.append(marker.parent)
-    return sorted(set(matches))
+def declares_missing_video(chart: Path, song_dir: Path) -> bool:
+    """Whether the chart's #VIDEO names a file that isn't in the folder.
+
+    A broken reference is not the same as a deliberate one, and this is the
+    usual state of a song whose video never downloaded: the chart arrived
+    from USDB naming a video the fetch then failed to produce. Leaving those
+    alone meant the script declined to do anything for exactly the songs
+    find_missing_video.py had just listed.
+    """
+    declared = video_tag_value(chart)
+    if declared is None:
+        return False
+    wanted = declared.lower()
+    return not any(p.is_file() and p.name.lower() == wanted for p in song_dir.iterdir())
+
+
+def set_video_tag(chart: Path, filename: str) -> None:
+    """Add #VIDEO, or repoint an existing one, keeping its place in the header."""
+    text, encoding = read_text_preserving_encoding(chart)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#") and line.lstrip()[1:].partition(":")[0].strip().upper() == "VIDEO":
+            lines[i] = f"#VIDEO:{filename}"
+            break
+    else:
+        lines.insert(header_end_index(lines), f"#VIDEO:{filename}")
+    chart.write_bytes((newline.join(lines) + newline).encode(encoding))
+
+
+def require_yt_dlp() -> None:
+    """Fail before downloading anything if yt-dlp cannot be run.
+
+    The download is fetched through `uv run --with yt-dlp`, so a missing
+    package normally surfaces as a resolver or network error buried in
+    yt-dlp's own stderr, after the script has already reported what it
+    intends to do. Checking up front turns that into one clear line.
+    """
+    try:
+        result = subprocess.run(
+            ["uv", "run", "--with", "yt-dlp", "yt-dlp", "--version"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "uv is not on PATH, so yt-dlp cannot be fetched -- install uv, "
+            "or put yt-dlp on PATH and adjust download_video()"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "timed out preparing yt-dlp (first run downloads it; check the network)"
+        ) from None
+    if result.returncode != 0:
+        raise RuntimeError(
+            "yt-dlp is not available:\n" + (result.stderr.strip()[-1000:] or "(no output)")
+        )
 
 
 def download_video(video_id: str, dest_stem: Path) -> Path:
@@ -133,7 +186,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("song_id", type=int, help="USDB song id, e.g. 7456")
+    parser.add_argument("song", help=song_folders.HELP)
     parser.add_argument("youtube", help="YouTube URL or bare 11-char video id")
     parser.add_argument(
         "--songs-dir", type=Path,
@@ -157,18 +210,11 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    matches = find_song_folder(args.songs_dir, args.song_id)
-    if not matches:
-        print(f"error: no folder under {args.songs_dir} has a .usdb marker "
-              f"for song id {args.song_id}", file=sys.stderr)
+    try:
+        song_dir = song_folders.resolve(args.song, args.songs_dir)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    if len(matches) > 1:
-        print(f"error: {len(matches)} folders claim usdb song id {args.song_id} "
-              f"-- resolve the duplicate first:", file=sys.stderr)
-        for m in matches:
-            print(f"  {m.name}", file=sys.stderr)
-        return 1
-    song_dir = matches[0]
 
     existing_videos = sorted(
         p.name for p in song_dir.iterdir()
@@ -183,7 +229,10 @@ def main() -> int:
     if not charts:
         print(f"error: {song_dir.name} has no .txt chart to tag", file=sys.stderr)
         return 1
-    untagged_charts = [c for c in charts if video_tag_value(c) is None]
+    untagged_charts = [
+        c for c in charts
+        if video_tag_value(c) is None or declares_missing_video(c, song_dir)
+    ]
     already_tagged = [c for c in charts if c not in untagged_charts]
 
     print(f"song:   {song_dir.name}")
@@ -193,7 +242,11 @@ def main() -> int:
     print(f"charts: {len(untagged_charts)} to tag, "
           f"{len(already_tagged)} already declare #VIDEO (left alone)")
     for c in already_tagged:
-        print(f"  already tagged: {c.name}")
+        print(f"  already tagged: {c.name} -> {video_tag_value(c)}")
+    for c in untagged_charts:
+        broken = video_tag_value(c)
+        if broken is not None:
+            print(f"  will repoint: {c.name} -> #VIDEO:{broken} (no such file in the folder)")
 
     if not args.write:
         print(f"\nDRY RUN -- would download to "
@@ -204,6 +257,12 @@ def main() -> int:
     if not untagged_charts:
         print("nothing to tag, not downloading")
         return 0
+
+    try:
+        require_yt_dlp()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     dest_stem = song_dir / song_dir.name
     print(f"\ndownloading to {dest_stem}.<ext> ...")
@@ -222,7 +281,7 @@ def main() -> int:
     print(f"downloaded: {video_path.name} ({size_mb:.1f} MB)")
 
     for chart in untagged_charts:
-        add_video_tag(chart, video_path.name)
+        set_video_tag(chart, video_path.name)
         print(f"tagged: {chart.name}")
 
     return 0

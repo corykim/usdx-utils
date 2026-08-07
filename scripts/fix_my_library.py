@@ -14,18 +14,27 @@ The sequence:
   1. strip_bom            A byte-order mark makes a header line invisible to
                           every other tool here, so clear them before anything
                           parses a chart.
-  2. tag_split_audio      Normalizes accompaniment.ogg -> instrumental.ogg and
-                          tags the stems, so step 3 can find split audio by its
+  2. prune_desynced_stems Deletes stems that disagree with their own song's
+                          audio, and strips their tags. Early, so the tagging
+                          steps neither measure nor complain about stems that
+                          are about to go; it recognizes accompaniment.ogg
+                          itself, so it does not need step 3's renaming first.
+                          It must come after step 1 (it reads #MP3, which a
+                          BOM hides) and before step 6, which points #MP3 at a
+                          stem for stems-only folders -- a folder in that state
+                          is one this step then skips forever.
+  3. tag_split_audio      Normalizes accompaniment.ogg -> instrumental.ogg and
+                          tags the stems, so step 4 can find split audio by its
                           conventional name.
-  3. resolve_duplicate_songs
+  4. resolve_duplicate_songs
                           Reconciles "<name> (N)" folders against "<name>",
                           moving whole folders around. Everything else works
                           per-folder, so settle which folders exist first.
-  4. tag_split_audio      Again: step 3 can merge in a stem that was declared
+  5. tag_split_audio      Again: step 4 can merge in a stem that was declared
                           under a non-standard name. Idempotent, so this is
                           usually a no-op.
-  5. fix_missing_mp3      Backfills #MP3, which needs the final audio layout.
-  6. find_missing_video   Declares #VIDEO for videos already sitting in a
+  6. fix_missing_mp3      Backfills #MP3, which needs the final audio layout.
+  7. find_missing_video   Declares #VIDEO for videos already sitting in a
                           folder untagged.
 
 --terse is handed on to the steps that understand it, so they report only
@@ -35,11 +44,12 @@ Then it reports what still needs a human: songs whose audio never downloaded,
 songs with no video at all, and songs not yet cross-referenced against USDB
 (regenerating usdb-missing.txt when --write is given).
 
-Deliberately NOT included: prune_desynced_stems.py, which permanently deletes
-stem files. songs/ is gitignored, so that cannot be undone -- run it by hand
-after reviewing its dry run. Note it skips any folder whose #MP3 points at a
-stem, and step 5 above creates exactly that pointer for stems-only folders,
-so run it BEFORE fix_my_library if you want it to consider those.
+**Step 5 deletes files, and songs/ is gitignored, so git will not bring them
+back.** It was left out of this run for exactly that reason until
+split_audio_stems.py existed; now a wrongly pruned stem can be regenerated
+from the song's own mix, which is what makes automating the deletion
+reasonable. It still only deletes under --write, like every other step, so
+the dry run remains the place to check what it has picked out.
 """
 
 from __future__ import annotations
@@ -69,11 +79,20 @@ class Step:
     # Only some steps have anything to hold back, and passing --terse to one
     # that doesn't understand it would abort the run on an unknown argument.
     accepts_terse: bool = False
+    # Deletes files rather than editing charts. Worth saying out loud in the
+    # step header, since songs/ is gitignored and nothing here is undoable.
+    destructive: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
 STEPS = [
     Step("strip_bom.py", "Remove UTF-8 BOMs from charts"),
+    Step(
+        "prune_desynced_stems.py",
+        "Delete stems that disagree with their song's own audio",
+        accepts_terse=True,
+        destructive=True,
+    ),
     Step(
         "tag_split_audio.py",
         "Normalize split-audio filenames and tags",
@@ -147,6 +166,8 @@ def main() -> int:
 
     for number, step in enumerate(STEPS, start=1):
         print(f"\n----- step {number}/{len(STEPS)}: {step.script} -- {step.summary} -----")
+        if step.destructive and args.write:
+            print("      (deletes files; songs/ is gitignored, so this is permanent)")
         code = run_step(step, args.songs_dir, terse=args.terse, write=args.write)
         if code != 0:
             print(

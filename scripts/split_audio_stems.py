@@ -53,8 +53,8 @@ import tempfile
 import time
 from pathlib import Path
 
-import audio_lengths
 import tag_split_audio
+from utils import audio_lengths, song_folders
 
 # Windows consoles are frequently stuck on a legacy codepage (e.g. cp1252)
 # that can't represent every character in these songs' filenames. Reconfigure
@@ -242,10 +242,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--dir",
-        type=Path,
         default=None,
-        metavar="SONG_DIR",
-        help="separate only this one song folder, instead of scanning the library",
+        metavar="SONG",
+        help=f"separate only one song, instead of scanning the library -- {song_folders.HELP}",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"model file (default: {DEFAULT_MODEL})")
     parser.add_argument(
@@ -273,10 +272,10 @@ def main() -> int:
         return list_models()
 
     if args.dir is not None:
-        song_dir = args.dir if args.dir.is_absolute() else Path.cwd() / args.dir
-        song_dir = song_dir.resolve()
-        if not song_dir.is_dir():
-            print(f"not a directory: {song_dir}", file=sys.stderr)
+        try:
+            song_dir = song_folders.resolve(args.dir, args.songs_dir)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 2
         mix = audio_lengths.find_full_mix(song_dir)
         if mix is None:

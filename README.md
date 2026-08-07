@@ -70,7 +70,11 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   The sequence is `strip_bom` → `tag_split_audio` → `resolve_duplicate_songs` → `tag_split_audio` again → `fix_missing_mp3` → `find_missing_video`. BOMs go first because one makes a header line invisible to every other tool here; duplicate resolution comes before the per-folder fixes because it moves whole folders around; and stem tagging runs on both sides of it so duplicate resolution can find split audio by its conventional name, and so anything it merges in under a non-standard name still gets normalized. The second tagging pass is idempotent and normally a no-op — in a *dry run* it reports the same counts as the first only because nothing was actually applied in between.
 
-  It deliberately leaves out `prune_desynced_stems.py`, which deletes files permanently. Run that one by hand.
+  The sequence is `strip_bom` → `prune_desynced_stems` → `tag_split_audio` → `resolve_duplicate_songs` → `tag_split_audio` → `fix_missing_mp3` → `find_missing_video`.
+
+  Pruning sits second because it is boxed in from both sides: it reads `#MP3`, which a byte-order mark hides, so it cannot precede `strip_bom`; and `fix_missing_mp3` points `#MP3` at a stem for folders that have nothing else, which is a state pruning skips — leave it until after and those folders are exempt for good. Inside that window it goes as early as it can, so the tagging passes don't measure or complain about stems that are about to be deleted. It **deletes files, and `songs/` is gitignored**, so this used to be left out on the grounds that it couldn't be undone; now that `split_audio_stems.py` can regenerate a stem from the song's own mix, automating it is reasonable. It still only deletes under `--write`, and a `--write` run says so in the step header.
+
+  It deliberately leaves out `split_audio_stems.py` — several hours of GPU time is not something to start as a side effect of a routine tidy-up.
 
 ### Individual remediations
 
@@ -81,7 +85,7 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/tag_split_audio.py --write     # apply changes
   ```
 
-  Stems are only tagged when they belong to the folder's **own** full mix — the same length check `prune_desynced_stems.py` uses, shared between them in `scripts/audio_lengths.py`. Pointing a chart at stems from a different rip would play them offset against its notes, so a mismatch is reported and left untagged instead. Having nothing to compare against is not a mismatch: a folder with no full mix is tagged as before. `--tolerance` sets how far apart is too far (default 1 second). The check only runs where there is actually something to tag, so an already-tagged library isn't slowed by measuring it.
+  Stems are only tagged when they belong to the folder's **own** full mix — the same length check `prune_desynced_stems.py` uses, shared between them in `scripts/utils/audio_lengths.py`. Pointing a chart at stems from a different rip would play them offset against its notes, so a mismatch is reported and left untagged instead. Having nothing to compare against is not a mismatch: a folder with no full mix is tagged as before. `--tolerance` sets how far apart is too far (default 1 second). The check only runs where there is actually something to tag, so an already-tagged library isn't slowed by measuring it.
 
   It also has a one-off mode for a Melody Mania (vocal-separation tool) bug: when a song's filename contains unicode characters, Melody Mania fails to write its split output into the song folder and instead strands a `<name>.vocals.ogg` / `<name>.accompaniment.ogg` pair under `%APPDATA%/LocalLow`. Point `--import-stranded` at either stranded file and it moves both into the song's folder as `vocals.ogg`/`instrumental.ogg` and tags the chart, skipping the full scan.
 
@@ -210,15 +214,17 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/prune_desynced_stems.py --write    # PERMANENT deletion
   ```
 
-  **Deletion cannot be undone** — `songs/` is gitignored, so there's no git history to restore from. This is why `fix_my_library.py` doesn't run it. It skips, and reports, any folder with no full-mix audio to compare against (a video is *not* used as the reference: music videos routinely carry extra footage, so their duration legitimately differs) and any folder whose `#MP3` points at a stem (deleting those would leave no audio at all). Since `fix_missing_mp3.py` creates exactly that kind of `#MP3` pointer for stems-only folders, run this *before* `fix_my_library.py` if you want those folders considered.
+  **Deletion cannot be undone from git** — `songs/` is gitignored, so there's no history to restore from. It can, however, be undone by `split_audio_stems.py`, which regenerates stems from the song's own mix; that is what changed this from something to run by hand into step 2 of `fix_my_library.py`. It skips, and reports, any folder with no full-mix audio to compare against (a video is *not* used as the reference: music videos routinely carry extra footage, so their duration legitimately differs) and any folder whose `#MP3` points at a stem (deleting those would leave no audio at all). `fix_missing_mp3.py` creates exactly that kind of pointer for stems-only folders, which is why the orchestrator runs this before it — the other way round, those folders would be skipped forever.
 
-- **`scripts/audio_lengths.py`** — not a command, but the shared length check the others use, and the only place anything external is run. Stems come out of a song's full mix, so they should be the same length as it; when they aren't they came from a different rip and will play offset against the chart. `tag_split_audio` won't tag such stems, `prune_desynced_stems` deletes them, and `resolve_duplicate_songs` won't move them onto a keeper they don't fit.
+  Each deleted stem also has its cached duration dropped, so the measurement never outlives the file it describes.
+
+- **`scripts/utils/audio_lengths.py`** — not a command, but the shared length check the others use, and the only place anything external is run. It lives in `scripts/utils/`, a package for modules that hold functions and constants and do nothing when imported; anything that *does* something when you run it is a script and sits one level up. Scripts reach it as `from utils import audio_lengths`. Stems come out of a song's full mix, so they should be the same length as it; when they aren't they came from a different rip and will play offset against the chart. `tag_split_audio` won't tag such stems, `prune_desynced_stems` deletes them, and `resolve_duplicate_songs` won't move them onto a keeper they don't fit.
 
   Which file counts as "the full mix" is decided by **what the chart names in `#MP3`**, not by what turns up first in the folder. A song folder can hold more than one candidate — 51 here do, usually an `.mp3` and an `.ogg` left behind by a re-rip — and 35 of those pairs turn out to be genuinely different recordings, in one case 92 seconds apart. Taking whichever sorted first meant measuring stems against a rip the chart never plays, which quietly inverts the check rather than merely weakening it: `prune_desynced_stems` would delete good stems for disagreeing with the wrong file, and `tag_split_audio` would approve stems that disagree with the right one. That had already happened to 34 folders. Only when no chart names an audio file does it fall back to the first one alphabetically.
 
   Worth remembering that a full mix is often **not** an mp3, whatever the tag is called: `.ogg`, `.flac` and `.opus` all show up, and `.ogg` is by far the most common in this library.
 
-  Measuring a library's worth of audio takes minutes, and the answer only changes when a file does, so results are kept between runs in `.audio-lengths.json` (gitignored). Entries are keyed by path **and file size**, so replacing a file re-measures it by itself, and entries whose file has gone or changed are dropped when the cache is written. Only successful measurements are stored — remembering a failure would make one bad run permanent. The file is written every hundred new measurements rather than only at the end, so interrupting a long run keeps what it had measured so far; stale entries are weeded out on the final write, which keeps those interim ones cheap. Set `AUDIO_LENGTH_CACHE` to move the file, or to an empty value to measure every time.
+  Measuring a library's worth of audio takes minutes, and the answer only changes when a file does, so results are kept between runs in `scripts/utils/.audio-lengths.json` (gitignored), beside the module that owns it. Entries are keyed by path **and file size**, so replacing a file re-measures it by itself, and entries whose file has gone or changed are dropped when the cache is written. `prune_desynced_stems` drops an entry outright via `forget()` as it deletes each stem — that matches on the path alone rather than path-and-size, since a file that has just been deleted can no longer be measured for the size half of its own key. Only successful measurements are stored — remembering a failure would make one bad run permanent. The file is written every hundred new measurements rather than only at the end, so interrupting a long run keeps what it had measured so far; stale entries are weeded out on the final write, which keeps those interim ones cheap. Set `AUDIO_LENGTH_CACHE` to move the file, or to an empty value to measure every time.
 
 - **`scripts/find_missing_audio.py`** — lists songs whose audio never arrived. A USDB download can fetch the chart and artwork but fail on the media when the source is geo-restricted or the API refuses it, leaving a folder that holds a chart, a cover, a background and a `.usdb` marker but nothing to play. Re-tagging can't fix those — there is no file for `#MP3` to point at — so they need the media fetching again.
 
@@ -236,6 +242,20 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/find_missing_video.py --category broken     # or: untagged, all
   uv run scripts/find_missing_video.py --write               # tag the untagged ones
   ```
+
+- **`scripts/fix_missing_video.py`** — the other half of the above: give it a song and a YouTube link and it downloads the video and tags the charts. Only the video stream is fetched, since UltraStar plays a background video muted — the sound comes from `#MP3` or the stems, so an audio track would be wasted bandwidth and a second, unwanted source of noise. Defaults to a dry run.
+
+  ```bash
+  uv run scripts/fix_missing_video.py "38 Special - Hold On Loosely" mh4CgxITgbE
+  uv run scripts/fix_missing_video.py "./songs/38 Special - Hold On Loosely/" mh4CgxITgbE --write
+  uv run scripts/fix_missing_video.py 7456 https://www.youtube.com/watch?v=mh4CgxITgbE --write
+  ```
+
+  The song can be a **folder path, a bare folder name, or a USDB song id**, whichever is to hand — the `find_missing_*` scripts print bare names, shells tab-complete paths, and `.usdb` markers carry the id. A path arrives from tab-completion with a trailing separator, and on Windows a trailing backslash inside double quotes escapes the quote and leaves a stray `"` on the end; both are trimmed, since neither is something you did wrong.
+
+  A `#VIDEO` tag naming a file that **isn't in the folder** counts as missing rather than as already handled. That's the usual state of a song whose video never downloaded — the chart comes from USDB already naming a video the fetch then failed to produce — so treating any tag at all as "leave this alone" meant declining to help with exactly the songs this exists for. A `#VIDEO` naming a file that really is there is still left alone unless you pass `--force`.
+
+  It's local-only: it prints the `#VIDEO:a=<id>,v=<id>` line USDB's own edit form expects, but pairing the video with the USDB entry stays a manual step you do yourself. `yt-dlp` is checked before anything is downloaded, so a missing one is a single clear line rather than a resolver error buried in yt-dlp's output after the script has already said what it planned to do.
 
 - **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one bare `<Artist> - <Title>` folder name per line (sorted) to stdout — the form songs are matched against USDB in — with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass `--full-paths` for full paths instead, or a directory to scan somewhere other than `songs/`.
 

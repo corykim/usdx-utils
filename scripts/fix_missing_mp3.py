@@ -35,7 +35,7 @@ import argparse
 import sys
 from pathlib import Path
 
-import audio_lengths
+from utils import audio_lengths
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

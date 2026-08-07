@@ -11,9 +11,10 @@ rather than being written out three times:
   resolve_duplicate_songs.py
                            won't move stems onto a keeper they don't fit
 
-This is a plain module rather than a `uv run` script. The scripts sit beside
-it, so the directory holding them is already on sys.path when any of them
-runs and a plain `import audio_lengths` finds it.
+This is a plain module rather than a `uv run` script, so it lives in
+scripts/utils/ with the other import-only modules. A script run as
+`uv run scripts/<name>.py` has scripts/ on sys.path, which makes
+`from utils import audio_lengths` resolve without any sys.path fixing.
 """
 
 from __future__ import annotations
@@ -38,7 +39,11 @@ DEFAULT_TOLERANCE_S = 1.0
 # AUDIO_LENGTH_CACHE to move it, or to an empty value to measure every time.
 CACHE_PATH = Path(
     os.environ.get(
-        "AUDIO_LENGTH_CACHE", Path(__file__).resolve().parent.parent / ".audio-lengths.json"
+        # Beside this module, so the thing that owns the cache is the thing
+        # that sits with it -- and moving the module cannot silently strand
+        # the file at a path derived by counting parents.
+        "AUDIO_LENGTH_CACHE",
+        Path(__file__).resolve().parent / ".audio-lengths.json",
     )
 )
 
@@ -192,6 +197,27 @@ def declared_audio(directory: Path) -> Path | None:
                     return entry
             break
     return None
+
+
+def forget(path: Path) -> bool:
+    """Drop any cached duration for a path. True if there was one.
+
+    Deliberately matches on the path alone rather than the path+size key
+    audio_duration() writes: a caller deleting a file cannot read its size
+    afterwards, so a key rebuilt at that point would never match and the
+    entry would linger until some later run happened to notice the file was
+    gone. Removing every size for the path also covers a file replaced more
+    than once between cache writes.
+    """
+    global _unsaved
+    cached = _load()
+    wanted = str(path.resolve())
+    stale = [key for key in cached if key.rpartition("|")[0] == wanted]
+    for key in stale:
+        del cached[key]
+    if stale:
+        _unsaved = True
+    return bool(stale)
 
 
 def find_full_mix(directory: Path) -> Path | None:

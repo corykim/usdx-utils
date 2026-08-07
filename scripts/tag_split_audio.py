@@ -32,7 +32,7 @@ import shutil
 import sys
 from pathlib import Path
 
-import audio_lengths
+from utils import audio_lengths
 
 # Windows consoles are frequently stuck on a legacy codepage (e.g. cp1252)
 # that can't represent every character in these songs' filenames. Reconfigure
