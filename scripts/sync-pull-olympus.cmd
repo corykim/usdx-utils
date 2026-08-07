@@ -1,0 +1,1 @@
+robocopy \\olympus\ultrastar\songs c:\ultrastar\songs /MIR /E /Z /R:3 /W:5
