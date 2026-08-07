@@ -13,6 +13,14 @@ YouTube source you pick and points #MP3 at the result.
 
     uv run scripts/extract_audio_from_youtube.py "Artist - Title" mh4CgxITgbE
     uv run scripts/extract_audio_from_youtube.py 7456 https://youtu.be/mh4CgxITgbE --write
+    uv run scripts/extract_audio_from_youtube.py "Artist - Title" ./downloads/clip.mkv --write
+
+The source can equally be a **local video or audio file**, in which case the
+track is copied straight out of it with ffmpeg and nothing is downloaded --
+useful when the folder already holds a video that has sound, or when the
+audio came from somewhere yt-dlp cannot reach. A file that turns out to have
+no audio track is refused before anything is written, since that is exactly
+the case this script exists to repair and re-creating it would be no help.
 
 Audio only: the video stream is not downloaded at all, so this is a small
 fraction of what fix_missing_video.py transfers for the same source. yt-dlp
@@ -162,6 +170,44 @@ def describe_requirement(chart: Path, timing: ChartTiming) -> str | None:
     return why
 
 
+# What to encode with for a given yt-dlp --audio-format name, when pulling the
+# track out of a local file. yt-dlp picks these itself; ffmpeg has to be told.
+LOCAL_ENCODERS = {
+    "vorbis": ["-c:a", "libvorbis", "-q:a", "8"],
+    "mp3": ["-c:a", "libmp3lame", "-q:a", "0"],
+    "opus": ["-c:a", "libopus", "-b:a", "192k"],
+    "flac": ["-c:a", "flac"],
+    "wav": ["-c:a", "pcm_s16le"],
+    "aac": ["-c:a", "aac", "-b:a", "256k"],
+    "m4a": ["-c:a", "aac", "-b:a", "256k"],
+}
+
+
+def extract_from_file(source: Path, dest_stem: Path, audio_format: str) -> Path:
+    """Copy the audio track out of a local video (or audio) file.
+
+    -vn drops the video rather than transcoding it, so this costs seconds
+    even for a large file: only the audio is re-encoded, and only because
+    the library wants one container throughout.
+    """
+    destination = dest_stem.with_name(f"{dest_stem.name}.{expected_extension(audio_format)}")
+    encoder = LOCAL_ENCODERS.get(audio_format, [])
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-vn", *encoder, str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()
+        raise RuntimeError(
+            f"ffmpeg could not extract audio from {source.name}: "
+            f"{detail[-1] if detail else f'exit {result.returncode}'}"
+        )
+    if not destination.is_file():
+        raise RuntimeError(f"ffmpeg reported success but {destination.name} is not there")
+    return destination
+
+
 def chart_outruns_audio(song_dir: Path, audio: Path) -> str | None:
     """An explanation if any chart needs more audio than this file has, else None.
 
@@ -215,7 +261,11 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("song", help=song_folders.HELP)
-    parser.add_argument("youtube", help="YouTube URL or bare 11-char video id")
+    parser.add_argument(
+        "source",
+        help="a YouTube URL or bare 11-char video id, or a path to a local video "
+             "or audio file to pull the track out of",
+    )
     parser.add_argument(
         "--songs-dir", type=Path,
         default=Path(__file__).resolve().parent.parent / "songs",
@@ -243,11 +293,22 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    try:
-        video_id = youtube.parse_video_id(args.youtube)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    # An existing file wins over a YouTube reading, the same precedence
+    # song_folders.resolve uses: what is on disk is unambiguous.
+    local_source = Path(song_folders.clean_argument(args.source))
+    video_id = None
+    if local_source.is_file():
+        if audio_lengths.has_audio_stream(local_source) is False:
+            print(f"error: {local_source.name} has no audio track to extract",
+                  file=sys.stderr)
+            return 1
+    else:
+        local_source = None
+        try:
+            video_id = youtube.parse_video_id(args.source)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     existing = audio_lengths.find_full_mix(song_dir)
     if existing is not None and not args.force:
@@ -262,8 +323,12 @@ def main() -> int:
     untagged = [c for c in charts if declares_missing_audio(c, song_dir)]
     already_tagged = [c for c in charts if c not in untagged]
 
+    described = (
+        str(local_source) if local_source is not None
+        else f"https://www.youtube.com/watch?v={video_id}"
+    )
     print(f"song:   {song_dir.name}")
-    print(f"audio:  https://www.youtube.com/watch?v={video_id}  (as {args.audio_format})")
+    print(f"source: {described}  (as {args.audio_format})")
     print(f"charts: {len(untagged)} to tag, {len(already_tagged)} already point at audio "
           f"that is there (left alone)")
     for chart in already_tagged:
@@ -281,25 +346,29 @@ def main() -> int:
         return 0
 
     if not untagged and not args.force:
-        print("nothing to tag, not downloading")
+        print("nothing to tag, not extracting")
         return 0
 
-    try:
-        youtube.require()
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    if local_source is None:
+        try:
+            youtube.require()
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     dest_stem = song_dir / song_dir.name
     print(f"\nextracting audio to {dest_stem}.{expected_extension(args.audio_format)} ...")
     try:
-        audio_path = youtube.fetch(
-            video_id,
-            dest_stem,
-            ["-f", "bestaudio/best", "-x",
-             "--audio-format", args.audio_format,
-             "--audio-quality", "0"],
-        )
+        if local_source is not None:
+            audio_path = extract_from_file(local_source, dest_stem, args.audio_format)
+        else:
+            audio_path = youtube.fetch(
+                video_id,
+                dest_stem,
+                ["-f", "bestaudio/best", "-x",
+                 "--audio-format", args.audio_format,
+                 "--audio-quality", "0"],
+            )
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

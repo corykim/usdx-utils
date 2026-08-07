@@ -261,6 +261,17 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   It's local-only: it prints the `#VIDEO:a=<id>,v=<id>` line USDB's own edit form expects, but pairing the video with the USDB entry stays a manual step you do yourself. `yt-dlp` is checked before anything is downloaded, so a missing one is a single clear line rather than a resolver error buried in yt-dlp's output after the script has already said what it planned to do.
 
+- **`scripts/extract_audio_from_youtube.py`** — the audio counterpart to the above, for what `find_missing_audio.py` reports: a USDB fetch that got the chart and artwork but failed on the media leaves a folder with nothing to play, and no amount of re-tagging conjures audio that isn't there. Fetches audio only — no video stream at all — and points `#MP3` at the result. Defaults to a dry run.
+
+  ```bash
+  uv run scripts/extract_audio_from_youtube.py "Artist - Title" mh4CgxITgbE
+  uv run scripts/extract_audio_from_youtube.py "Artist - Title" ./downloads/clip.mkv --write
+  ```
+
+  The source can be a YouTube URL or id, **or a path to a local video or audio file** — then ffmpeg lifts the track straight out of it and nothing is downloaded, which suits a folder whose video does have sound, or audio from somewhere yt-dlp can't reach. A local file with no audio track is refused before anything is written: that's the very state this script exists to repair.
+
+  Unlike a video, the result's **length is checked against the chart**. A background video legitimately runs longer or shorter than the song, but `#MP3` is the audio the notes are timed against, so a chart whose singing runs past the end of the file is being played against the wrong recording — a radio edit, another live take, the wrong song. `#END` is respected, since playback stops there and notes beyond it are never reached. A download that fails the check is deleted and reported; `--force` keeps it. Afterwards it reminds you to re-check `#GAP`, because a different source almost always starts at a different offset and nothing here can verify that for you.
+
 - **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one bare `<Artist> - <Title>` folder name per line (sorted) to stdout — the form songs are matched against USDB in — with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass `--full-paths` for full paths instead, or a directory to scan somewhere other than `songs/`.
 
   ```bash
