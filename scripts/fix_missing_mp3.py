@@ -3,16 +3,28 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Add a missing #MP3 tag to USDX charts that have no combined audio/video
-reference.
+"""Point every USDX chart's #MP3 tag at the best audio its folder actually has.
 
-A handful of song folders only contain split vocals.ogg/instrumental.ogg
-stems with no full mix, so #MP3 (the tag UltraStar clients use as the
-primary audio reference) was never set. For each chart missing #MP3, this
-script points it at:
-  * the folder's video file (.mp4/.webm/.mkv/.avi), if one exists, else
-  * instrumental.ogg, if that split stem exists, else
+#MP3 is what UltraStar clients play, so it wants the folder's full mix
+whenever there is one. The other options are fallbacks for folders that have
+no plain audio file at all, in order:
+  * the folder's full-mix audio (.mp3/.ogg/...), else
+  * its video file (.mp4/.webm/.mkv/.avi), else
+  * instrumental.ogg, else
   * left alone and reported as needing manual attention.
+
+This script originally only ever *added* a missing tag, and picked the video
+before it looked for audio -- on the assumption, true of the handful of
+folders it was written for, that a folder needing #MP3 had nothing but split
+stems. Applied to a folder that did have a full mix, that assumption put the
+video in the tag while the real audio sat next to it: `Demi Lovato - Gift Of
+A Friend` ended up playing a 203.1s .avi against a chart whose stems came out
+of a 205.5s .mp3.
+
+So a tag that names a video or a stem while a full mix sits beside it is now
+corrected rather than left alone -- as is one naming a file that isn't there.
+A video in #MP3 with no audio in the folder is the documented fallback doing
+its job, and is left exactly as it is.
 
 Defaults to a dry run; pass --write to actually modify files.
 """
@@ -23,12 +35,15 @@ import argparse
 import sys
 from pathlib import Path
 
+import audio_lengths
+
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mkv", ".avi")
 INSTRUMENTAL_NAME = "instrumental.ogg"
+STEM_NAMES = frozenset({"vocals.ogg", "instrumental.ogg", "accompaniment.ogg"})
 # utf-8-sig decodes UTF-8 with or without a leading BOM and drops it. Charts
 # are always written back as plain UTF-8, so a BOM never survives an edit.
 TAG_ENCODINGS = ("utf-8-sig", "cp1252")
@@ -62,11 +77,6 @@ def read_text_preserving_encoding(path: Path) -> tuple[str, str]:
     return raw.decode("utf-8", errors="replace"), "utf-8"
 
 
-def has_tag(lines: list[str], tag: str) -> bool:
-    prefix = f"#{tag}:".lower()
-    return any(line.strip().lower().startswith(prefix) for line in lines)
-
-
 def header_end_index(lines: list[str]) -> int:
     """Index of the first line that is not a #TAG: header line."""
     for i, line in enumerate(lines):
@@ -76,6 +86,15 @@ def header_end_index(lines: list[str]) -> int:
 
 
 def determine_mp3_value(song_dir: Path) -> str | None:
+    """The best audio reference this folder can offer, best first.
+
+    find_full_mix already knows to skip stems and videos, so sharing it with
+    the length checks keeps one definition of what counts as a folder's own
+    audio rather than letting a second one drift away from it.
+    """
+    mix = audio_lengths.find_full_mix(song_dir)
+    if mix:
+        return mix.name
     video = find_video(song_dir)
     if video:
         return video.name
@@ -85,22 +104,42 @@ def determine_mp3_value(song_dir: Path) -> str | None:
     return None
 
 
-def add_mp3_tag(chart: Path, value: str, *, write: bool) -> bool:
+def wrong_reference(song_dir: Path, current: str) -> bool:
+    """Whether an existing #MP3 value should be replaced.
+
+    Only two things are wrong: naming a file that isn't there, and naming a
+    video or a stem when the folder has a full mix to name instead. A video
+    with no audio beside it is the fallback working as intended.
+    """
+    if find_case_insensitive(song_dir, current) is None:
+        return True
+    suffix = Path(current).suffix.lower()
+    is_second_best = suffix in VIDEO_EXTENSIONS or current.lower() in STEM_NAMES
+    return is_second_best and audio_lengths.find_full_mix(song_dir) is not None
+
+
+def mp3_index(lines: list[str]) -> int | None:
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("#mp3:"):
+            return i
+    return None
+
+
+def set_mp3_tag(chart: Path, value: str, *, write: bool) -> None:
+    """Add #MP3, or rewrite it in place so the tag keeps its position in the
+    header rather than being moved to the end by a delete-and-append."""
     text, encoding = read_text_preserving_encoding(chart)
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
 
-    if has_tag(lines, "MP3"):
-        return False
-
-    insert_at = header_end_index(lines)
-    lines.insert(insert_at, f"#MP3:{value}")
+    index = mp3_index(lines)
+    if index is None:
+        lines.insert(header_end_index(lines), f"#MP3:{value}")
+    else:
+        lines[index] = f"#MP3:{value}"
 
     if write:
-        new_text = newline.join(lines) + newline
-        chart.write_bytes(new_text.encode(encoding))
-
-    return True
+        chart.write_bytes((newline.join(lines) + newline).encode(encoding))
 
 
 def main() -> int:
@@ -130,7 +169,7 @@ def main() -> int:
         print(f"error: {songs_dir} is not a directory", file=sys.stderr)
         return 1
 
-    fixed = 0
+    added = corrected = 0
     unresolved: list[Path] = []
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
@@ -138,25 +177,37 @@ def main() -> int:
             if chart.name.startswith("._"):
                 continue
             text, _ = read_text_preserving_encoding(chart)
-            if has_tag(text.splitlines(), "MP3"):
+            lines = text.splitlines()
+            index = mp3_index(lines)
+            current = lines[index].split(":", 1)[1].strip() if index is not None else None
+
+            if current is not None and not wrong_reference(song_dir, current):
                 continue
 
             value = determine_mp3_value(song_dir)
             if value is None:
                 unresolved.append(chart)
                 if not args.terse:
-                    print(f"skip (no video or instrumental.ogg): {chart.relative_to(songs_dir)}")
+                    print(f"skip (no audio, video or instrumental.ogg): {chart.relative_to(songs_dir)}")
+                continue
+            if value == current:
                 continue
 
-            add_mp3_tag(chart, value, write=args.write)
-            fixed += 1
-            verb = "updated" if args.write else "would update"
-            print(f"{verb}: {chart.relative_to(songs_dir)} -> #MP3:{value}")
+            set_mp3_tag(chart, value, write=args.write)
+            if current is None:
+                added += 1
+                verb = "added" if args.write else "would add"
+                print(f"{verb}: {chart.relative_to(songs_dir)} -> #MP3:{value}")
+            else:
+                corrected += 1
+                verb = "corrected" if args.write else "would correct"
+                print(f"{verb}: {chart.relative_to(songs_dir)} -> #MP3:{current} -> #MP3:{value}")
 
     mode = "write" if args.write else "dry-run"
+    fixed = added + corrected
     print(
-        f"\n[{mode}] charts {'fixed' if args.write else 'needing #MP3'}: {fixed}, "
-        f"unresolved (no video or instrumental.ogg): {len(unresolved)}"
+        f"\n[{mode}] charts given a #MP3: {added}, charts pointed at better audio: {corrected}, "
+        f"unresolved (nothing to point at): {len(unresolved)}"
     )
     if not args.write and fixed:
         print("Re-run with --write to apply changes.")

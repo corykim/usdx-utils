@@ -106,12 +106,16 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   Nothing is installed into a song folder until it has been measured against the mix it came from, because the presence of `vocals.ogg` is what marks a song done — a half-written one would look finished to the next run. Songs that fail are reported, left alone, and picked up again next time, so an interrupted run just resumes. It is deliberately **not** part of `fix_my_library.py`: a full pass over this library is several hours of GPU time and isn't something to trigger by accident.
 
-- **`scripts/fix_missing_mp3.py`** — some song folders have only split `vocals.ogg`/`instrumental.ogg` stems and no full mix, so `#MP3` (the tag UltraStar clients use as the primary audio reference) was never set. Scans every chart under `songs/` for a missing `#MP3` tag and adds one pointing at the folder's video file if present, otherwise `instrumental.ogg`; folders with neither are reported and left alone. Defaults to a dry run.
+- **`scripts/fix_missing_mp3.py`** — `#MP3` is the tag UltraStar clients use as the primary audio reference, and some song folders never got one: they hold only split `vocals.ogg`/`instrumental.ogg` stems, or a chart arrived without it. Scans every chart under `songs/` and points the tag at the best audio the folder actually has — its **full mix**, failing that its **video**, failing that **`instrumental.ogg`**. Folders with none of the three are reported and left alone. Defaults to a dry run.
 
   ```bash
   uv run scripts/fix_missing_mp3.py            # preview changes
   uv run scripts/fix_missing_mp3.py --write     # apply changes
   ```
+
+  The video is a *fallback*, and the ordering matters more than it looks. This script used to reach for the video first, which was harmless for the handful of stems-only folders it was written for but wrong anywhere a real audio file existed — and a video's duration is not the song's. `Demi Lovato - Gift Of A Friend` ended up playing a 203.1s `.avi` against a chart whose stems had been separated out of the 205.5s `.mp3` sitting next to it.
+
+  So it also **corrects** an existing tag, not just a missing one, in the two cases where the value is actually wrong rather than merely second-choice: it names a file that isn't in the folder, or it names a video or a stem while a full mix is available. A `#MP3` pointing at a video in a folder with no audio at all is the fallback doing its job and is left untouched.
 
 - **`scripts/resolve_duplicate_songs.py`** — finds song folders that are the same song stored more than once and reconciles each set. One copy becomes the **keeper**; the rest are retired into `songs.replaced/`. Defaults to a dry run. Requires `ffprobe` (ffmpeg) on PATH.
 
