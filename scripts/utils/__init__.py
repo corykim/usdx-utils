@@ -9,6 +9,6 @@ so `from utils import audio_lengths` resolves with no sys.path juggling. The
 modules do not import each other, so importing one never drags in the rest.
 """
 
-from . import audio_lengths, song_folders
+from . import audio_lengths, song_folders, youtube
 
-__all__ = ["audio_lengths", "song_folders"]
+__all__ = ["audio_lengths", "song_folders", "youtube"]

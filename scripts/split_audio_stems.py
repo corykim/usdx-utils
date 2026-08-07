@@ -38,12 +38,21 @@ Note the stems come out at the model's own 44.1kHz regardless of the mix's
 sample rate. Duration is preserved to the microsecond, which is what the
 charts are timed against, so a 48kHz source is not a reason to skip a song.
 
+A song that fails leaves a .stem-separation-failed.json memo in its folder,
+naming the audio it failed on, and later runs skip it. A minute of GPU time
+per song means a library-wide pass that rediscovers the same broken files
+every time costs hours; the memo is keyed to the audio's name and size, so
+replacing the mix retries it automatically. --retry-failed ignores the memos,
+--terse skips them without a word, and a successful separation deletes any
+memo it finds -- it should never outlive the problem it describes.
+
 Defaults to a dry run; pass --write to actually separate anything.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -51,6 +60,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import tag_split_audio
@@ -65,6 +75,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 VOCALS_NAME = "vocals.ogg"
 INSTRUMENTAL_NAME = "instrumental.ogg"
+
+# Dropped in a song folder when separation fails, so a later library-wide run
+# does not spend a minute of GPU time rediscovering the same broken file.
+FAILURE_MEMO_NAME = ".stem-separation-failed.json"
 
 # BS-Roformer (Viperx 1297). Best instrumental SDR of the models audio-separator
 # ships (16.45), with vocals close behind the leaders (11.77) -- and the
@@ -82,14 +96,77 @@ DEFAULT_MODEL_DIR = Path(
 OUTPUT_BITRATE = "192k"
 
 
-def find_candidates(songs_dir: Path, *, force: bool) -> tuple[list[tuple[Path, Path]], int, int]:
+def audio_fingerprint(mix: Path) -> str:
+    """Identify the exact audio a result belongs to, by name and size.
+
+    The same pairing audio_lengths uses for its cache: replacing a song's
+    mix with a different rip changes the size, so a memo written about the
+    old one stops applying by itself.
+    """
+    try:
+        return f"{mix.name}|{mix.stat().st_size}"
+    except OSError:
+        return mix.name
+
+
+def read_failure_memo(song_dir: Path) -> dict | None:
+    try:
+        payload = json.loads((song_dir / FAILURE_MEMO_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def failure_recorded_for(song_dir: Path, mix: Path) -> str | None:
+    """The reason this exact mix failed before, if it did."""
+    memo = read_failure_memo(song_dir)
+    if memo and memo.get("audio") == audio_fingerprint(mix):
+        return str(memo.get("error", "(no reason recorded)"))
+    return None
+
+
+def write_failure_memo(song_dir: Path, mix: Path, model: str, error: str) -> None:
+    """Record that this audio could not be separated, so a later run skips it.
+
+    Separation costs about a minute of GPU time, so a library-wide pass that
+    rediscovers the same handful of broken files every time wastes hours. The
+    memo is tied to the audio's fingerprint rather than the folder: replace
+    the mix and the next run tries again on its own.
+    """
+    payload = {
+        "audio": audio_fingerprint(mix),
+        "model": model,
+        "error": error[:2000],
+        "failed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "note": (
+            f"Written by split_audio_stems.py. Delete this file, or pass "
+            f"--retry-failed, to try {mix.name} again."
+        ),
+    }
+    try:
+        (song_dir / FAILURE_MEMO_NAME).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass  # a memo that cannot be written is not worth failing the run over
+
+
+def clear_failure_memo(song_dir: Path) -> None:
+    """Drop a memo once the folder has stems, so it cannot outlive the problem."""
+    (song_dir / FAILURE_MEMO_NAME).unlink(missing_ok=True)
+
+
+def find_candidates(
+    songs_dir: Path, *, force: bool, retry_failed: bool
+) -> tuple[list[tuple[Path, Path]], int, int, int]:
     """Song folders that have a full mix but no stems yet.
 
-    Returns (candidates, already_done, no_mix). A folder with vocals.ogg is
-    considered done -- see the module docstring on why that is a safe marker.
+    Returns (candidates, already_done, no_mix, failed_before). A folder with
+    vocals.ogg is considered done -- see the module docstring on why that is
+    a safe marker.
     """
     candidates: list[tuple[Path, Path]] = []
-    already_done = no_mix = 0
+    already_done = no_mix = failed_before = 0
 
     for song_dir in sorted(songs_dir.iterdir()):
         if not song_dir.is_dir() or song_dir.name.startswith("."):
@@ -104,9 +181,12 @@ def find_candidates(songs_dir: Path, *, force: bool) -> tuple[list[tuple[Path, P
             # trustworthy to validate the stems against -- leave them be.
             no_mix += 1
             continue
+        if not retry_failed and failure_recorded_for(song_dir, mix) is not None:
+            failed_before += 1
+            continue
         candidates.append((song_dir, mix))
 
-    return candidates, already_done, no_mix
+    return candidates, already_done, no_mix, failed_before
 
 
 def stage_input(mix: Path, workdir: Path) -> Path:
@@ -124,11 +204,20 @@ def stage_input(mix: Path, workdir: Path) -> Path:
     writes 16-bit output regardless.
     """
     staged = workdir / "input.wav"
-    subprocess.run(
+    result = subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-i", str(mix), "-ac", "2", "-c:a", "pcm_s16le", str(staged)],
-        check=True,
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        # ffmpeg's own complaint, not the whole command line: this ends up in
+        # the failure memo, where "returned non-zero exit status 3753488571"
+        # would tell nobody anything.
+        detail = result.stderr.strip().splitlines()
+        raise RuntimeError(
+            f"ffmpeg could not decode {mix.name}: "
+            f"{detail[-1] if detail else f'exit {result.returncode}'}"
+        )
     return staged
 
 
@@ -263,6 +352,11 @@ def main() -> int:
     )
     parser.add_argument("--terse", action="store_true", help="only report songs something happened to")
     parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help=f"ignore {FAILURE_MEMO_NAME} memos and retry songs that failed before",
+    )
+    parser.add_argument(
         "--verbose", action="store_true", help="show audio-separator's own INFO logging"
     )
     parser.add_argument("--write", action="store_true", help="actually separate and install stems")
@@ -285,13 +379,21 @@ def main() -> int:
         if existing and not args.force:
             print(f"already has stems (use --force to redo): {song_dir.name}")
             return 0
-        candidates, already_done, no_mix = [(song_dir, mix)], 0, 0
+        # Naming one song is an explicit instruction, so a memo from a past
+        # failure is reported rather than obeyed -- it is usually exactly why
+        # the song is being named.
+        previously = failure_recorded_for(song_dir, mix)
+        if previously is not None and not args.terse:
+            print(f"note: {mix.name} failed here before: {previously}")
+        candidates, already_done, no_mix, failed_before = [(song_dir, mix)], 0, 0, 0
     else:
         songs_dir = args.songs_dir
         if not songs_dir.is_dir():
             print(f"songs directory not found: {songs_dir}", file=sys.stderr)
             return 2
-        candidates, already_done, no_mix = find_candidates(songs_dir, force=args.force)
+        candidates, already_done, no_mix, failed_before = find_candidates(
+            songs_dir, force=args.force, retry_failed=args.retry_failed
+        )
 
     if args.limit is not None:
         candidates = candidates[: args.limit]
@@ -299,7 +401,13 @@ def main() -> int:
     mode = "write" if args.write else "dry-run"
     print(f"[{mode}] {len(candidates)} song(s) to separate", end="")
     if args.dir is None:
-        print(f"; {already_done} already have stems, {no_mix} have no full mix")
+        print(f"; {already_done} already have stems, {no_mix} have no full mix", end="")
+        # --terse is for a run where nothing happened being one quiet line, so
+        # a memo does its job silently: the song is skipped and not mentioned.
+        if failed_before and not args.terse:
+            print(f", {failed_before} failed before on this same audio "
+                  f"(--retry-failed to try again)", end="")
+        print()
     else:
         print()
 
@@ -322,6 +430,12 @@ def main() -> int:
     for index, (song_dir, mix) in enumerate(candidates, start=1):
         started = time.monotonic()
         prefix = f"[{index}/{len(candidates)}]"
+        # Announce the song before the model starts, not after it finishes.
+        # audio-separator's progress bar goes to stderr and can run for a
+        # minute; without this it is a bar with nothing to say what it is
+        # working on. Flushed because that bar is on a different stream and
+        # would otherwise appear above this line.
+        print(f"{prefix} {song_dir.name}  <-  {mix.name}", flush=True)
         try:
             with tempfile.TemporaryDirectory(prefix="stems-") as tmp:
                 vocals, instrumental = separate_one(separator, mix, Path(tmp))
@@ -333,29 +447,33 @@ def main() -> int:
             return 130
         except Exception as exc:  # a bad file should not end a 13-hour run
             failed += 1
-            print(f"{prefix} FAILED {song_dir.name}: {exc}")
+            write_failure_memo(song_dir, mix, args.model, str(exc))
+            print(f"        FAILED: {exc}")
             continue
 
         if problem:
             failed += 1
-            print(f"{prefix} rejected {song_dir.name}: {problem}")
+            write_failure_memo(song_dir, mix, args.model, problem)
+            print(f"        rejected: {problem}")
             continue
 
         notes = tag_charts(song_dir, write=True)
+        # Whatever went wrong before, this folder now has stems.
+        clear_failure_memo(song_dir)
         done += 1
         took = time.monotonic() - started
         elapsed_total += took
         remaining = (len(candidates) - index) * (elapsed_total / done)
         if not args.terse:
-            print(
-                f"{prefix} {song_dir.name}  ({took:.0f}s, ~{remaining / 3600:.1f}h left)"
-            )
+            print(f"        done in {took:.0f}s, ~{remaining / 3600:.1f}h left")
             for note in notes:
                 print(f"        tagged {note}")
 
     print(f"\n[{mode}] separated {done} song(s), {failed} failed")
     if failed:
-        print("Failed songs keep their mix untouched and will be retried on the next run.")
+        print(f"Failed songs keep their mix untouched, and each now carries a "
+              f"{FAILURE_MEMO_NAME} naming the audio it failed on, so later runs "
+              f"skip it. Pass --retry-failed, or replace the audio, to try again.")
     return 0
 
 

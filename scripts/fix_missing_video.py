@@ -41,11 +41,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from find_missing_video import (  # noqa: E402
@@ -55,40 +53,11 @@ from find_missing_video import (  # noqa: E402
     read_text_preserving_encoding,
     video_tag_value,
 )
-from utils import song_folders  # noqa: E402
+from utils import song_folders, youtube  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
-
-YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-
-
-def parse_youtube_id(text: str) -> str:
-    """Accept a bare 11-char id or any of the common URL shapes."""
-    text = text.strip()
-    if YOUTUBE_ID_RE.match(text):
-        return text
-
-    parsed = urlparse(text if "://" in text else f"https://{text}")
-    host = parsed.netloc.lower().removeprefix("www.").removeprefix("m.")
-
-    if host == "youtu.be":
-        candidate = parsed.path.strip("/").split("/")[0]
-    elif host in ("youtube.com", "music.youtube.com"):
-        if parsed.path == "/watch":
-            candidate = parse_qs(parsed.query).get("v", [""])[0]
-        elif parsed.path.startswith(("/shorts/", "/embed/", "/live/")):
-            candidate = parsed.path.split("/")[2] if len(parsed.path.split("/")) > 2 else ""
-        else:
-            candidate = ""
-    else:
-        candidate = ""
-
-    if not YOUTUBE_ID_RE.match(candidate):
-        raise ValueError(f"couldn't find a YouTube video id in {text!r}")
-    return candidate
-
 
 def declares_missing_video(chart: Path, song_dir: Path) -> bool:
     """Whether the chart's #VIDEO names a file that isn't in the folder.
@@ -118,59 +87,6 @@ def set_video_tag(chart: Path, filename: str) -> None:
     else:
         lines.insert(header_end_index(lines), f"#VIDEO:{filename}")
     chart.write_bytes((newline.join(lines) + newline).encode(encoding))
-
-
-def require_yt_dlp() -> None:
-    """Fail before downloading anything if yt-dlp cannot be run.
-
-    The download is fetched through `uv run --with yt-dlp`, so a missing
-    package normally surfaces as a resolver or network error buried in
-    yt-dlp's own stderr, after the script has already reported what it
-    intends to do. Checking up front turns that into one clear line.
-    """
-    try:
-        result = subprocess.run(
-            ["uv", "run", "--with", "yt-dlp", "yt-dlp", "--version"],
-            capture_output=True, text=True, timeout=120,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "uv is not on PATH, so yt-dlp cannot be fetched -- install uv, "
-            "or put yt-dlp on PATH and adjust download_video()"
-        ) from None
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            "timed out preparing yt-dlp (first run downloads it; check the network)"
-        ) from None
-    if result.returncode != 0:
-        raise RuntimeError(
-            "yt-dlp is not available:\n" + (result.stderr.strip()[-1000:] or "(no output)")
-        )
-
-
-def download_video(video_id: str, dest_stem: Path) -> Path:
-    """Fetch the best video-only stream, named after dest_stem, and return its path."""
-    result = subprocess.run(
-        [
-            "uv", "run", "--with", "yt-dlp", "yt-dlp",
-            "-f", "bestvideo",
-            "--no-playlist",
-            "-o", f"{dest_stem}.%(ext)s",
-            "--print", "after_move:filepath",
-            f"https://www.youtube.com/watch?v={video_id}",
-        ],
-        capture_output=True, text=True, timeout=600,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"yt-dlp failed (exit {result.returncode}):\n{result.stderr.strip()[-2000:]}"
-        )
-    path_line = next(
-        (line for line in result.stdout.splitlines() if line.strip()), ""
-    ).strip()
-    if not path_line or not Path(path_line).is_file():
-        raise RuntimeError(f"yt-dlp reported success but no file found:\n{result.stdout}")
-    return Path(path_line)
 
 
 def probe_has_video_stream(path: Path) -> bool:
@@ -205,7 +121,7 @@ def main() -> int:
         return 1
 
     try:
-        video_id = parse_youtube_id(args.youtube)
+        video_id = youtube.parse_video_id(args.youtube)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -259,7 +175,7 @@ def main() -> int:
         return 0
 
     try:
-        require_yt_dlp()
+        youtube.require()
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -267,7 +183,9 @@ def main() -> int:
     dest_stem = song_dir / song_dir.name
     print(f"\ndownloading to {dest_stem}.<ext> ...")
     try:
-        video_path = download_video(video_id, dest_stem)
+        # Video only: UltraStar plays the background muted, so an audio
+        # track would be wasted bandwidth and a second source of sound.
+        video_path = youtube.fetch(video_id, dest_stem, ["-f", "bestvideo"])
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
