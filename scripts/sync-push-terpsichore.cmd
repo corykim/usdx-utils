@@ -1,0 +1,1 @@
+robocopy d:\ultrastar\songs \\terpsichore\ultrastar\songs /MIR /E /Z /R:3 /W:5
