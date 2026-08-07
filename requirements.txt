@@ -1,0 +1,93 @@
+# Dependencies for scripts/split_audio_stems.py (GPU stem separation).
+#
+# Nothing here needs installing for normal use: the script carries a PEP 723
+# header, so `uv run scripts/split_audio_stems.py` builds this environment on
+# its own, on any platform. This file is for a conventional venv/pip workflow,
+# and as a record of the exact versions verified working on this machine.
+#
+#   uv pip install -r requirements.txt
+#
+# The three torch wheels are pinned by URL rather than via --extra-index-url.
+# An extra index would make uv resolve *every* package against PyTorch's index
+# first, so certifi and friends fail to be found there at the pinned versions;
+# the workaround is a global --index-strategy flag, which is not expressible in
+# a requirements file. Naming the wheels directly keeps the plain command
+# working, since then everything else simply comes from PyPI.
+#
+# The cost is that those three lines are specific to CPython 3.13 on 64-bit
+# Windows, and the CUDA build must carry sm_120 kernels for the RTX 5070 --
+# torch without them fails at the first GPU dispatch, not at import. For a
+# different interpreter, OS or card, swap the filenames from
+# https://download.pytorch.org/whl/cu128/ or just use `uv run`, which works
+# all of this out per-platform on its own.
+#
+# --pre is for onnx-weekly, which audio-separator pulls in as a pre-release.
+#
+# Regenerate the pinned versions with:
+#   uv export --script scripts/split_audio_stems.py --no-hashes
+--pre
+
+absl-py==2.5.0
+audio-separator==0.44.5
+audioop-lts==0.2.2
+audioread==3.1.0
+beartype==0.18.5
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.4.9
+colorama==0.4.6
+cython==3.2.9
+decorator==5.3.1
+diffq-fixed==0.2.4
+einops==0.8.2
+filelock==3.32.2
+flatbuffers==25.12.19
+fsspec==2026.7.0
+idna==3.18
+jinja2==3.1.6
+joblib==1.5.3
+julius==0.2.8
+lazy-loader==0.5
+librosa==0.11.0
+llvmlite==0.48.0
+markupsafe==3.0.3
+ml-collections==1.1.0
+ml-dtypes==0.5.4
+mpmath==1.3.0
+msgpack==1.2.1
+narwhals==2.24.0
+networkx==3.6.1
+numba==0.66.0
+numpy==2.4.6
+onnx-weekly==1.23.0.dev20260805
+onnx2torch-py313==1.6.0
+onnxruntime-gpu==1.28.0
+packaging==26.3
+pillow==12.3.0
+platformdirs==4.11.0
+pooch==1.9.0
+protobuf==7.35.1
+pycparser==3.0
+pydub==0.25.1
+pyyaml==6.0.3
+requests==2.34.2
+resampy==0.4.3
+rotary-embedding-torch==0.6.5
+samplerate==0.1.0
+scikit-learn==1.9.0
+scipy==1.18.0
+setuptools==81.0.0
+six==1.17.0
+soundfile==0.14.0
+soxr==1.1.0
+standard-aifc==3.13.0
+standard-chunk==3.13.0
+standard-sunau==3.13.0
+sympy==1.14.0
+threadpoolctl==3.6.0
+torch @ https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp313-cp313-win_amd64.whl
+torchaudio @ https://download.pytorch.org/whl/cu128/torchaudio-2.11.0%2Bcu128-cp313-cp313-win_amd64.whl
+torchvision @ https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp313-cp313-win_amd64.whl
+tqdm==4.70.0
+typing-extensions==4.16.0
+urllib3==2.7.0

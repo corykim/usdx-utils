@@ -52,7 +52,7 @@ These files are consumed by UltraStar-family game clients (UltraStar Deluxe, Voc
 
 ## Scripts
 
-Requires [`uv`](https://docs.astral.sh/uv/), plus `ffprobe` (ffmpeg) on PATH for the audio-length checks.
+Requires [`uv`](https://docs.astral.sh/uv/), plus `ffmpeg`/`ffprobe` on PATH for the audio-length checks. `split_audio_stems.py` additionally wants a CUDA GPU; every other script is pure filesystem and text work with no Python dependencies at all.
 
 Every script defaults to a **dry run** and needs `--write` to change anything.
 
@@ -88,6 +88,23 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   ```bash
   uv run scripts/tag_split_audio.py --import-stranded "/path/to/LocalLow/.../SongName.vocals.ogg" --write
   ```
+
+- **`scripts/split_audio_stems.py`** — separates a song's full mix into `vocals.ogg` / `instrumental.ogg` on the GPU, then tags the charts to match. Every other script here reacts to stems that already exist; this is the one that makes them. Defaults to a dry run.
+
+  ```bash
+  uv run scripts/split_audio_stems.py                                  # what would be separated
+  uv run scripts/split_audio_stems.py --write                          # separate everything missing stems
+  uv run scripts/split_audio_stems.py --write --dir "songs/Artist - Title"   # just this one song
+  uv run scripts/split_audio_stems.py --list-models                    # alternatives, with SDR scores
+  ```
+
+  Separation is done by [`audio-separator`](https://github.com/nomadkaraoke/python-audio-separator) running a UVR model, BS-Roformer (Viperx-1297) by default — the best instrumental SDR of the models it bundles, and the instrumental is the half anyone actually sings over. `--model` takes any of the others. The checkpoint is ~640MB and downloads itself on first use, into `~/.cache/audio-separator-models` unless `AUDIO_SEPARATOR_MODELS` says otherwise.
+
+  This is the one script with Python dependencies, and the one that needs a GPU. They're declared in the script's own PEP 723 header, so `uv run` still installs nothing by hand; `requirements.txt` at the repo root pins the same set for anyone who'd rather use a normal venv. What it does need is a CUDA build of torch with kernels for your actual card — `torch.cuda.is_available()` reports True on a Blackwell GPU even when the wheel has no `sm_120` in it, and you don't find out until the first separation dies. Reckon on 30–60s per song.
+
+  Two details worth knowing, because both look like bugs otherwise. The mix is decoded to a **stereo** WAV before it reaches the model: BS-Roformer refuses anything that isn't 2-channel, and this library has mono rips and 5.1 soundtrack rips in it. And the stems come back at the model's own **44.1kHz** no matter what the source was — most of this collection is 48kHz. Their duration is preserved to the microsecond, which is what the chart is timed against, so nothing plays offset; but it does mean comparing a stem against its mix sample-for-sample tells you nothing.
+
+  Nothing is installed into a song folder until it has been measured against the mix it came from, because the presence of `vocals.ogg` is what marks a song done — a half-written one would look finished to the next run. Songs that fail are reported, left alone, and picked up again next time, so an interrupted run just resumes. It is deliberately **not** part of `fix_my_library.py`: a full pass over this library is several hours of GPU time and isn't something to trigger by accident.
 
 - **`scripts/fix_missing_mp3.py`** — some song folders have only split `vocals.ogg`/`instrumental.ogg` stems and no full mix, so `#MP3` (the tag UltraStar clients use as the primary audio reference) was never set. Scans every chart under `songs/` for a missing `#MP3` tag and adds one pointing at the folder's video file if present, otherwise `instrumental.ogg`; folders with neither are reported and left alone. Defaults to a dry run.
 
