@@ -156,6 +156,44 @@ def audio_duration(path: Path) -> float | None:
     return result
 
 
+def declared_audio(directory: Path) -> Path | None:
+    """The audio file the folder's charts name in #MP3, if it is there.
+
+    Returns None when no chart names one, or when the name points at a video
+    or a stem -- those are #MP3's documented fallbacks for folders with no
+    audio, not a full mix.
+    """
+    for chart in sorted(directory.glob("*.txt")):
+        if chart.name.startswith("._"):  # macOS AppleDouble sidecar file
+            continue
+        try:
+            raw = chart.read_bytes()
+        except OSError:
+            continue
+        for encoding in ("utf-8-sig", "cp1252"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            continue
+        for line in text.replace("﻿", "").splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("#mp3:"):
+                continue
+            named = stripped.split(":", 1)[1].strip().lower()
+            if not named or named in STEM_FILENAMES:
+                break
+            if Path(named).suffix.lower() not in AUDIO_EXTENSIONS:
+                break
+            for entry in directory.iterdir():
+                if entry.is_file() and entry.name.lower() == named:
+                    return entry
+            break
+    return None
+
+
 def find_full_mix(directory: Path) -> Path | None:
     """The folder's full-mix audio file, or None if it has none.
 
@@ -163,7 +201,21 @@ def find_full_mix(directory: Path) -> Path | None:
     video routinely carries extra footage before or after the song, so its
     duration legitimately differs and comparing against one would condemn
     perfectly good stems.
+
+    **What the chart names in #MP3 wins**, because that is the audio the game
+    actually plays and the audio the notes are timed against; only when no
+    chart names one does the first audio file alphabetically stand in. 51
+    folders here hold two candidates, usually an .mp3 and an .ogg left over
+    from a re-rip, and 35 of those pairs are different recordings -- one is
+    92s longer than the other. Picking by filename order meant measuring
+    stems against a rip the chart never plays, which quietly inverts the
+    safety check every caller here relies on: `prune_desynced_stems` would
+    delete stems for disagreeing with the wrong file, and `tag_split_audio`
+    would bless stems that disagree with the right one.
     """
+    declared = declared_audio(directory)
+    if declared is not None:
+        return declared
     for entry in sorted(directory.iterdir()):
         if (
             entry.is_file()
