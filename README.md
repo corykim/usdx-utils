@@ -119,7 +119,9 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   uv run scripts/fix_missing_mp3.py --write     # apply changes
   ```
 
-  The video is a *fallback*, and the ordering matters more than it looks. This script used to reach for the video first, which was harmless for the handful of stems-only folders it was written for but wrong anywhere a real audio file existed — and a video's duration is not the song's. `Demi Lovato - Gift Of A Friend` ended up playing a 203.1s `.avi` against a chart whose stems had been separated out of the 205.5s `.mp3` sitting next to it.
+  A video only counts as audio if it **actually has an audio stream**. `fix_missing_video.py` downloads `-f bestvideo` deliberately — UltraStar plays the background video muted — so the file it leaves behind carries a video stream and nothing else. Between them the two scripts pointed `#MP3` at silence for 11 songs, which played without a sound. Nine had an `instrumental.ogg` to fall back to; the remaining two need audio fetching with `extract_audio_from_youtube.py`, since no tag can conjure audio that isn't there. A silent video in `#MP3` is corrected whether or not the folder has anything better — it isn't a second-best choice, it's simply wrong.
+
+  The video is otherwise a *fallback*, and the ordering matters more than it looks. This script used to reach for the video first, which was harmless for the handful of stems-only folders it was written for but wrong anywhere a real audio file existed — and a video's duration is not the song's. `Demi Lovato - Gift Of A Friend` ended up playing a 203.1s `.avi` against a chart whose stems had been separated out of the 205.5s `.mp3` sitting next to it.
 
   So it also **corrects** an existing tag, not just a missing one, in the two cases where the value is actually wrong rather than merely second-choice: it names a file that isn't in the folder, or it names a video or a stem while a full mix is available. A `#MP3` pointing at a video in a folder with no audio at all is the fallback doing its job and is left untouched.
 

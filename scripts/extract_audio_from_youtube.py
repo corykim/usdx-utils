@@ -187,7 +187,13 @@ def chart_outruns_audio(song_dir: Path, audio: Path) -> str | None:
 
 
 def declares_missing_audio(chart: Path, song_dir: Path) -> bool:
-    """Whether the chart's #MP3 names a file that isn't in the folder."""
+    """Whether the chart's #MP3 fails to name audio this folder can play.
+
+    Present is not the same as playable. A folder whose video was fetched by
+    fix_missing_video.py holds an .mp4 with no audio stream at all, and #MP3
+    routinely points at it; treating that as audio already handled is what
+    made this script decline to act on the songs it exists for.
+    """
     text = read_text_preserving_encoding(chart)[0]
     lines = text.splitlines()
     index = mp3_index(lines)
@@ -196,7 +202,12 @@ def declares_missing_audio(chart: Path, song_dir: Path) -> bool:
     named = lines[index].split(":", 1)[1].strip().lower()
     if not named:
         return True
-    return not any(p.is_file() and p.name.lower() == named for p in song_dir.iterdir())
+    target = next(
+        (p for p in song_dir.iterdir() if p.is_file() and p.name.lower() == named), None
+    )
+    if target is None:
+        return True
+    return audio_lengths.has_audio_stream(target) is False
 
 
 def main() -> int:

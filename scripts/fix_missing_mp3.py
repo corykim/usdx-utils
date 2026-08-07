@@ -96,7 +96,10 @@ def determine_mp3_value(song_dir: Path) -> str | None:
     if mix:
         return mix.name
     video = find_video(song_dir)
-    if video:
+    # Only a video that actually carries an audio track. Demanding a definite
+    # True rather than "not False" means an unprobeable file falls through to
+    # the stem instead of being tagged on the strength of a guess.
+    if video and audio_lengths.has_audio_stream(video) is True:
         return video.name
     instrumental = find_case_insensitive(song_dir, INSTRUMENTAL_NAME)
     if instrumental:
@@ -111,9 +114,15 @@ def wrong_reference(song_dir: Path, current: str) -> bool:
     video or a stem when the folder has a full mix to name instead. A video
     with no audio beside it is the fallback working as intended.
     """
-    if find_case_insensitive(song_dir, current) is None:
+    target = find_case_insensitive(song_dir, current)
+    if target is None:
         return True
     suffix = Path(current).suffix.lower()
+    # A video with no audio track is worse than second-best: the song plays
+    # silent. That is wrong whether or not the folder has something better,
+    # so it is judged before the full-mix comparison, not as part of it.
+    if suffix in VIDEO_EXTENSIONS and audio_lengths.has_audio_stream(target) is False:
+        return True
     is_second_best = suffix in VIDEO_EXTENSIONS or current.lower() in STEM_NAMES
     return is_second_best and audio_lengths.find_full_mix(song_dir) is not None
 
@@ -188,7 +197,15 @@ def main() -> int:
             if value is None:
                 unresolved.append(chart)
                 if not args.terse:
-                    print(f"skip (no audio, video or instrumental.ogg): {chart.relative_to(songs_dir)}")
+                    # "no video" and "a video that makes no sound" are
+                    # different problems: the second needs audio fetching
+                    # (extract_audio_from_youtube.py), not a better tag.
+                    why = (
+                        "its only video has no audio track"
+                        if find_video(song_dir) is not None
+                        else "no audio, video or instrumental.ogg"
+                    )
+                    print(f"skip ({why}): {chart.relative_to(songs_dir)}")
                 continue
             if value == current:
                 continue

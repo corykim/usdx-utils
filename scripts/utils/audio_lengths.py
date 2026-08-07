@@ -199,6 +199,35 @@ def declared_audio(directory: Path) -> Path | None:
     return None
 
 
+def has_audio_stream(path: Path) -> bool | None:
+    """Whether the file actually carries audio. None if it cannot be probed.
+
+    A container's extension promises nothing. `fix_missing_video.py` fetches
+    `-f bestvideo` on purpose -- UltraStar plays a background video muted --
+    so the .mp4 it leaves behind holds a video stream and nothing else.
+    Anything treating "there is a video file" as "there is audio" points
+    #MP3 at silence, which is how 11 songs here ended up unplayable.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return "audio" in proc.stdout
+
+
 def forget(path: Path) -> bool:
     """Drop any cached duration for a path. True if there was one.
 
