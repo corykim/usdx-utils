@@ -37,6 +37,23 @@ the whole failure this library's stem checks exist to catch, and it is
 cheaper to catch before the file is kept than after. A download that fails
 the check is deleted and reported; --force keeps it anyway.
 
+--trim cuts the result down to the song and shifts the timing tags to match.
+The window is #START to #END -- the spec's own "start and end point for the
+song" -- so what it removes is exactly what playback already skipped. #GAP is
+deliberately not used as the lower bound: it marks beat 0, and the bars of
+intro before the first note are what a singer comes in on.
+
+Everything is measured from the start of the audio file, so cutting T seconds
+off the front moves #GAP and #END earlier by T and retires #START. #VIDEOGAP
+moves the *other* way: per the spec it is the video's delay relative to the
+audio, positive delaying it and negative skipping into it, so with the audio
+now starting later in the song the video must skip an equal amount to stay
+level and the value goes down. The check that matters is that the same video
+frame still lands on beat 0, and it does: 30000/+5 and 10000/-15 both put it
+at 25.0s. That sign cannot be inferred from a library's values -- this one
+uses both -- so it comes from the spec:
+https://github.com/UltraStar-Deluxe/format
+
 Defaults to a dry run; --write applies it. If the folder already has audio,
 this refuses without --force rather than adding a second source.
 """
@@ -51,6 +68,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fix_missing_mp3 import (  # noqa: E402
+    header_end_index,
     mp3_index,
     read_text_preserving_encoding,
     set_mp3_tag,
@@ -208,6 +226,135 @@ def extract_from_file(source: Path, dest_stem: Path, audio_format: str) -> Path:
     return destination
 
 
+def format_number(value: float) -> str:
+    """Write a tag value back without gaining a spurious ".0"."""
+    rounded = round(value, 3)
+    return str(int(rounded)) if rounded == int(rounded) else f"{rounded:g}"
+
+
+def find_header(lines: list[str], key: str) -> int | None:
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("#"):
+            return None  # past the header, into the notes
+        if line.lstrip()[1:].partition(":")[0].strip().upper() == key:
+            return index
+    return None
+
+
+def update_header_tags(chart: Path, updates: dict[str, str | None], *, write: bool) -> list[str]:
+    """Set, add or remove header tags, keeping existing ones where they are."""
+    text, encoding = read_text_preserving_encoding(chart)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    changes: list[str] = []
+
+    for key, value in updates.items():
+        index = find_header(lines, key)
+        if value is None:
+            if index is not None:
+                changes.append(f"removed #{key}:{lines[index].split(':', 1)[1].strip()}")
+                del lines[index]
+        elif index is None:
+            lines.insert(header_end_index(lines), f"#{key}:{value}")
+            changes.append(f"added #{key}:{value}")
+        else:
+            previous = lines[index].split(":", 1)[1].strip()
+            if previous != value:
+                lines[index] = f"#{key}:{value}"
+                changes.append(f"#{key}:{previous} -> {value}")
+
+    if changes and write:
+        chart.write_bytes((newline.join(lines) + newline).encode(encoding))
+    return changes
+
+
+def trim_bounds(charts: list[Path]) -> tuple[float, float | None]:
+    """Where the song actually starts and stops inside the audio.
+
+    #START and #END are the spec's own "start and end point for the song",
+    so the region outside them is what playback already skips -- cutting it
+    loses nothing that was ever heard. #GAP is deliberately *not* used as a
+    lower bound: it marks beat 0, and the bars of intro before the first
+    note are what a singer comes in on.
+
+    Across a duet's two charts the widest window wins, so trimming can never
+    remove audio one of them still needs.
+    """
+    starts = [t.start for t in map(chart_timing, charts) if t.start]
+    ends = [t.end for t in map(chart_timing, charts) if t.end]
+    return (min(starts) if starts else 0.0), (max(ends) if ends else None)
+
+
+def trim_audio(audio: Path, start: float, stop: float | None, audio_format: str) -> None:
+    """Cut the file down to [start, stop] seconds, in place."""
+    staged = audio.with_name(f"{audio.stem}.trimming{audio.suffix}")
+    argv = ["ffmpeg", "-v", "error", "-y"]
+    if start > 0:
+        argv += ["-ss", f"{start:.3f}"]
+    if stop is not None:
+        # A duration, not an end point: -to's meaning shifts depending on
+        # whether it sits before or after -i, and -t's does not.
+        argv += ["-t", f"{stop - start:.3f}"]
+    argv += ["-i", str(audio), "-vn", *LOCAL_ENCODERS.get(audio_format, []), str(staged)]
+
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        staged.unlink(missing_ok=True)
+        detail = result.stderr.strip().splitlines()
+        raise RuntimeError(
+            f"ffmpeg could not trim {audio.name}: "
+            f"{detail[-1] if detail else f'exit {result.returncode}'}"
+        )
+    staged.replace(audio)
+    # Same path, new length: the cached duration describes a file that is gone.
+    audio_lengths.forget(audio)
+
+
+def retag_after_trim(
+    chart: Path, removed: float, *, has_video: bool, write: bool
+) -> list[str]:
+    """Shift a chart's timing tags to match audio whose head was cut off.
+
+    Everything is measured from the start of the audio file, so removing
+    `removed` seconds from it moves every one of them earlier by that much.
+
+    #VIDEOGAP is the exception, and it moves the other way. Per the format
+    spec it is the delay of the video *relative to the audio*, positive
+    delaying the video and negative skipping into it -- so with the audio
+    now starting later in the song, the video has to skip an equal amount to
+    stay level, and the value goes down. Getting that sign backwards would
+    desync every video it touched, and it cannot be inferred from the values
+    in a library: this one holds both signs.
+    """
+    timing = chart_timing(chart)
+    updates: dict[str, str | None] = {}
+
+    text = read_text_preserving_encoding(chart)[0]
+    lines = text.splitlines()
+
+    gap_index = find_header(lines, "GAP")
+    if gap_index is not None:
+        current = _header_float(lines[gap_index].split(":", 1)[1])
+        if current is not None:
+            updates["GAP"] = format_number(current - removed * 1000.0)
+
+    # #START described where the song began in the old file; the new file
+    # begins there, so the tag has nothing left to say.
+    if timing.start:
+        updates["START"] = None
+    if timing.end is not None:
+        updates["END"] = format_number((timing.end - removed) * 1000.0)
+
+    if has_video:
+        videogap_index = find_header(lines, "VIDEOGAP")
+        current = 0.0
+        if videogap_index is not None:
+            current = _header_float(lines[videogap_index].split(":", 1)[1]) or 0.0
+        updates["VIDEOGAP"] = format_number(current - removed)
+
+    return update_header_tags(chart, updates, write=write)
+
+
 def chart_outruns_audio(song_dir: Path, audio: Path) -> str | None:
     """An explanation if any chart needs more audio than this file has, else None.
 
@@ -276,6 +423,11 @@ def main() -> int:
         help=f"yt-dlp --audio-format value (default: {DEFAULT_AUDIO_FORMAT})",
     )
     parser.add_argument(
+        "--trim", action="store_true",
+        help="Cut the result down to the song, using #START/#END, and shift "
+             "#GAP/#END/#VIDEOGAP to match.",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Download even if the folder already has audio, and keep a result "
              "whose length disagrees with the chart.",
@@ -339,6 +491,22 @@ def main() -> int:
         if requirement is not None:
             print(f"  {requirement}")
 
+    trim_start, trim_stop = trim_bounds(charts) if args.trim else (0.0, None)
+    has_video = any(
+        p.is_file() and p.suffix.lower() in audio_lengths.VIDEO_EXTENSIONS
+        for p in song_dir.iterdir()
+    )
+    if args.trim:
+        if trim_start <= 0 and trim_stop is None:
+            print("  --trim: no #START or #END to trim to, keeping the whole file")
+        else:
+            window = f"{trim_start:.1f}s to " + (f"{trim_stop:.1f}s" if trim_stop else "the end")
+            print(f"  --trim: cutting to {window}"
+                  + (f", shifting tags back by {trim_start:.1f}s" if trim_start > 0 else ""))
+            if trim_start > 0 and has_video:
+                print(f"          and #VIDEOGAP down by {trim_start:.1f}s, so the "
+                      f"video skips the same amount and stays level")
+
     if not args.write:
         print(f"\nDRY RUN -- would extract audio to "
               f"{song_dir.name}/{song_dir.name}.{expected_extension(args.audio_format)} "
@@ -383,6 +551,22 @@ def main() -> int:
         return 1
     if problem:
         print(f"warning: {problem} (kept anyway, --force)")
+
+    # Trimming happens after the fit check, so the check still compares the
+    # chart against the file its tags actually describe.
+    if args.trim and (trim_start > 0 or trim_stop is not None):
+        try:
+            trim_audio(audio_path, trim_start, trim_stop, args.audio_format)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print("the untrimmed audio is still in place.", file=sys.stderr)
+            return 1
+        if trim_start > 0:
+            for chart in charts:
+                for change in retag_after_trim(
+                    chart, trim_start, has_video=has_video, write=True
+                ):
+                    print(f"retimed: {chart.name} -> {change}")
 
     size_mb = audio_path.stat().st_size / 1_000_000
     length = audio_lengths.audio_duration(audio_path)
