@@ -88,6 +88,8 @@ When editing or generating chart files, preserve this exact tag/note syntax — 
 - When reconciling `songs/` against `usdb-missing.txt` or USDB itself, match by the `<Artist> - <Title>` folder name.
 - A one-off Melody Mania (vocal separation tool) bug used to strand split output under `%APPDATA%/LocalLow` for songs with unicode filenames, and a since-removed fixup script for it inserted `#VOCALS`/`#INSTRUMENTAL` tags positionally without checking for existing ones — leaving some charts with `accompaniment.ogg` (instead of `instrumental.ogg`) and/or duplicated tags. `tag_split_audio.py` now normalizes both; re-run it after adding new split-audio songs.
 - **USDB requires a logged-in session for everything except song detail pages.** `?link=detail&id=<id>` reads anonymously, but `?link=list`, artist search and `?link=gettxt` all return "You are not logged in. Login to use this function." So an entry's metadata can be checked without credentials; its chart and any listing cannot.
+- **Fixing one field of an existing USDB entry's `#VIDEO` tag should preserve the tag's existing shape**, not replace it with a template built from a different song's context. An entry with only `v=` (no `a=`) is deliberately using the video as its audio source too, per the `a=`/`v=` semantics documented above — swap just the dead field and leave `co=`/`bg=`/the missing `a=` alone.
+- **Tooling built for this repo defaults to local-only fixes.** Scripts should fix local files (download media, tag charts) and, where relevant, print whatever tag text the user needs — but never attempt to edit the live USDB site itself unless explicitly asked; that stays a manual, separate step the user does themselves.
 
 ## Auditing a chart against its audio
 
