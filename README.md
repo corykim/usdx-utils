@@ -289,6 +289,20 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
 
   Unlike a video, the result's **length is checked against the chart**. A background video legitimately runs longer or shorter than the song, but `#MP3` is the audio the notes are timed against, so a chart whose singing runs past the end of the file is being played against the wrong recording — a radio edit, another live take, the wrong song. `#END` is respected, since playback stops there and notes beyond it are never reached. A download that fails the check is deleted and reported; `--force` keeps it. Afterwards it reminds you to re-check `#GAP`, because a different source almost always starts at a different offset and nothing here can verify that for you.
 
+- **`scripts/apply_replaygain.py`** — gives every song a ReplayGain tag, and gives its stems the same one. UltraStar Deluxe *reads* these tags (from 2025.4.0, once you switch ReplayGain on under Tools → Options → Sound) but never writes them, so something else has to. The USDB syncer writes them for the audio it fetches — roughly two thirds of the full mixes here already carry one — and this fills in the rest and passes the value on to `vocals.ogg` and `instrumental.ogg`, which nothing had ever tagged. Defaults to a dry run.
+
+  ```bash
+  uv run scripts/apply_replaygain.py                        # what would be tagged
+  uv run scripts/apply_replaygain.py --write                # tag the library
+  uv run scripts/apply_replaygain.py --dir "Artist - Title" --write
+  ```
+
+  **The audio is never re-encoded.** A ReplayGain tag only records how much to turn a track down at playback, so nothing is resampled or recompressed and the change can be undone by deleting the tag. Confirmed rather than assumed: decoding a mix and both its stems to raw PCM before and after tagging gives byte-identical hashes.
+
+  Every file in a folder gets the **same gain**, taken from the full mix, and that's the point of the script. A stem measured on its own is much quieter than the mix it came from — for one song here the mix scores −9.90 dB against −4.07 for the vocal and −5.95 for the instrumental — so normalizing each independently would push the two stems nearly 2 dB apart and undo the balance UltraStar's vocals toggle relies on. Peaks stay per-file, because a peak describes the file rather than the correction, and they matter: plenty of these gains are *positive* (one quiet rip scored +5.27 dB), and a player needs the peak to avoid clipping when it turns a track up.
+
+  A folder with stems but no full mix gets its reference rebuilt by summing the stems — separation output adds back up to what it came from. That sum happens in a temp directory and never lands in the song folder, where it would start being mistaken for the real mix. It's approximate, about 1.7 dB off on the song that has both to compare, which is the best available for the 41 folders in that state and still better than normalizing them by a different rule than everything else.
+
 - **`scripts/find_missing_stems.py`** — lists songs with no usable `vocals.ogg` + `instrumental.ogg` pair, separated into two problems because they need different fixes. **`none`** is a song with no stems at all, split again by `--category has-source|no-source` depending on whether there's a full mix to separate from; a `has-source` listing is precisely the work queue for `split_audio_stems.py`, while `no-source` needs audio fetching first. **`partial`** is a song with exactly one of the two files — separation always produces both, so that's a data problem rather than a normal state.
 
   ```bash
