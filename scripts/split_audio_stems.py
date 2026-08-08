@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["audio-separator[gpu]", "torch", "torchaudio"]
+# dependencies = ["audio-separator[gpu]", "torch", "torchaudio", "ffmpeg-normalize", "mutagen"]
 #
 # [[tool.uv.index]]
 # name = "pytorch-cu128"
@@ -55,6 +55,14 @@ and asks for --allow-cpu first, rather than quietly starting something that
 would take days. --use-directml opts into the experimental AMD/Intel path,
 which additionally needs torch-directml in the dependency header above.
 
+New stems are given the mix's ReplayGain value as they are created, by
+handing the folder to apply_replaygain.py. A stem born without one is out of
+step with the library from the moment it exists, and it has to take the
+mix's gain rather than its own -- measuring a stem alone would boost it
+several dB and pull the vocal/instrumental balance apart. Most mixes already
+carry a gain, so this is usually one tag read and two writes against a minute
+of separation. --no-replaygain skips it.
+
 Defaults to a dry run; pass --write to actually separate anything.
 """
 
@@ -74,6 +82,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import apply_replaygain
 import tag_split_audio
 from utils import audio_lengths, song_folders
 
@@ -404,6 +413,11 @@ def main() -> int:
         help=f"ignore {FAILURE_MEMO_NAME} memos and retry songs that failed before",
     )
     parser.add_argument(
+        "--no-replaygain",
+        action="store_true",
+        help="skip tagging new stems with the mix's ReplayGain value",
+    )
+    parser.add_argument(
         "--use-directml",
         action="store_true",
         help="allow DirectML (AMD/Intel graphics on Windows) when there is no CUDA "
@@ -544,6 +558,25 @@ def main() -> int:
         notes = tag_charts(song_dir, write=True)
         # Whatever went wrong before, this folder now has stems.
         clear_failure_memo(song_dir)
+
+        # A stem born without a ReplayGain tag is out of step with the rest of
+        # the library the moment it exists, and takes its gain from the mix
+        # rather than from itself -- so the folder is tagged here rather than
+        # left for a later pass to notice. apply_replaygain reuses a gain the
+        # mix already carries, which is most of them, so this is usually a tag
+        # read and two tag writes against a minute of separation.
+        if not args.no_replaygain:
+            try:
+                apply_replaygain.process(song_dir, force=False, terse=True, write=True)
+                gain = apply_replaygain.read_gain(song_dir / VOCALS_NAME)
+                if gain and not args.terse:
+                    replaygain_note = f"replaygain {gain}"
+                else:
+                    replaygain_note = None
+            except Exception as exc:  # a tagging problem must not lose the stems
+                replaygain_note = f"replaygain failed: {exc}"
+        else:
+            replaygain_note = None
         done += 1
         took = time.monotonic() - started
         elapsed_total += took
@@ -552,6 +585,8 @@ def main() -> int:
             print(f"        done in {took:.0f}s, ~{remaining / 3600:.1f}h left")
             for note in notes:
                 print(f"        tagged {note}")
+            if replaygain_note:
+                print(f"        {replaygain_note}")
 
     print(f"\n[{mode}] separated {done} song(s), {failed} failed")
     if failed:
