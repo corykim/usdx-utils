@@ -35,13 +35,25 @@ prune_desynced_stems and tag_split_audio compare against.
 Targets follow usdb_syncer: -18 LUFS, or -23 for Opus, whose header carries
 an R128 gain referenced to that instead.
 
+Running it again over a tagged library is a no-op and cheap: a gain already
+present is reused rather than re-measured, and a stem already carrying it is
+skipped. ReplayGain never accumulates -- the tag is an instruction to the
+player, not a change to the samples -- so repeating this can never attenuate
+anything twice, unlike the re-encoding kind of normalization.
+
+--force distrusts a stored value and measures again, but still writes only
+where the answer differs. It measures on a throwaway copy to do that, since
+ffmpeg-normalize will only tell you a gain by writing it. Rewriting a file
+with the number it already had costs a fresh modification time, and a sync
+that compares timestamps would then resend the whole library for nothing.
+
 Defaults to a dry run; pass --write to tag anything.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import os
 import shutil
 import subprocess
 import sys
@@ -127,9 +139,28 @@ def scan_gain(path: Path) -> str | None:
         progress=False,
         replaygain=True,
     )
-    normalizer.add_media_file(str(path), __import__("os").devnull)
+    normalizer.add_media_file(str(path), os.devnull)
     normalizer.run_normalization()
     return read_gain(path)
+
+
+def measure_gain(path: Path) -> str | None:
+    """What the gain *would* be, without touching the file.
+
+    ffmpeg-normalize only reports a gain by writing it, so re-measuring a
+    file that already carries a tag is done on a throwaway copy. That keeps
+    --force meaning "do not trust the stored value" rather than "rewrite
+    regardless": a verification pass over an already-correct library then
+    changes nothing on disk, and a sync that compares modification times has
+    nothing to send.
+    """
+    with tempfile.TemporaryDirectory(prefix="rg-measure-") as tmp:
+        scratch = Path(tmp) / f"probe{path.suffix.lower()}"
+        try:
+            shutil.copy2(path, scratch)
+        except OSError:
+            return None
+        return scan_gain(scratch)
 
 
 def reconstruct_mix(stems: list[Path], workdir: Path) -> Path:
@@ -190,16 +221,31 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
     gain = None
 
     if mix is not None:
-        gain = read_gain(mix)
-        if gain is not None and not force:
-            reported.append(f"{mix.name} already {GAIN_KEY}={gain}")
-        elif write:
-            gain = scan_gain(mix)
+        existing = read_gain(mix)
+        gain = existing
+        if existing is not None and not force:
+            reported.append(f"{mix.name} already {GAIN_KEY}={existing}")
+        elif not write:
+            reported.append(
+                f"{mix.name} would be re-measured" if existing
+                else f"{mix.name} would be measured and tagged"
+            )
+        elif existing is None:
+            gain = scan_gain(mix)          # nothing there yet, so write directly
             if gain is None:
                 return "unmeasurable"
             reported.append(f"{mix.name} -> {GAIN_KEY}={gain}")
         else:
-            reported.append(f"{mix.name} would be measured and tagged")
+            # --force over an existing tag: measure on a copy first, so a value
+            # that turns out to be the same leaves the file entirely alone.
+            gain = measure_gain(mix)
+            if gain is None:
+                return "unmeasurable"
+            if gain == existing:
+                reported.append(f"{mix.name} re-measured, unchanged at {existing}")
+            else:
+                gain = scan_gain(mix)
+                reported.append(f"{mix.name} -> {GAIN_KEY}={existing} -> {gain}")
     else:
         # Stems but no mix: rebuild the reference rather than measure a stem,
         # so these folders are normalized by the same rule as every other.
@@ -219,7 +265,11 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
 
     outcome = "tagged"
     if stems:
-        needing = [s for s in stems if force or read_gain(s) != gain or gain is None]
+        # No --force short-circuit here on purpose. A stem that already holds
+        # the right gain is already correct, and rewriting it would produce a
+        # fresh mtime for nothing -- which a sync comparing timestamps reads
+        # as a file to send again, thousands of times over.
+        needing = [s for s in stems if gain is None or read_gain(s) != gain]
         if not needing:
             reported.append("stems already carry it")
             outcome = "already done"
@@ -249,7 +299,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="stop after this many songs")
     parser.add_argument(
         "--force", action="store_true",
-        help="re-measure and re-tag even where a ReplayGain tag is already there",
+        help="distrust the stored value and measure again; files whose gain "
+             "turns out unchanged are left untouched",
     )
     parser.add_argument("--terse", action="store_true", help="only report the tallies")
     parser.add_argument("--write", action="store_true", help="actually write tags")
