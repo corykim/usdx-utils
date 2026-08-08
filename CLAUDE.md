@@ -40,12 +40,22 @@ Each chart file starts with `#KEY:VALUE` metadata tags, followed by note lines:
 Note lines:
 - `: <beat> <length> <pitch> <text>` — normal sung note
 - `* <beat> <length> <pitch> <text>` — golden (bonus) note
-- `F <beat> <length> <pitch> <text>` — freestyle note
+- `R` / `G` — rap and golden rap notes; they carry no meaningful pitch and clients must ignore it
+- `F <beat> <length> <pitch> <text>` — freestyle note; no pitch, and scores nothing
 - `- <beat>` — line break
 - `P1` / `P2` — marks the start of a part for duet songs, splitting the chart between two singers
 - `E` — end of file
 
 When editing or generating chart files, preserve this exact tag/note syntax — it's consumed by UltraStar-family game clients (UltraStar Deluxe, Vocaluxe, etc.), not by any code in this repo.
+
+### The spec is authoritative — check it rather than infer
+
+[The UltraStar File Format (v1)](https://github.com/UltraStar-Deluxe/format/blob/main/The%20UltraStar%20File%20Format%20(v1).md) defines every tag. Fetch the [raw file](https://raw.githubusercontent.com/UltraStar-Deluxe/format/main/The%20UltraStar%20File%20Format%20(v1).md) to read it. Several rules cannot be worked out from the files in this library, and guessing them wrong corrupts timing silently:
+
+- **`#START` is seconds; `#END` is milliseconds** — as is `#GAP`. Two adjacent tags, two different units. 181 charts here carry `#START`, 139 `#END`.
+- **`#VIDEOGAP` is seconds, and a positive value *delays* the video** while a negative one skips that much of its start. This library's own data points the other way — 69 positive against 31 negative, with the largest positive values on videos that visibly hold extra footage — so reading the convention off the collection gives the opposite answer. `extract_audio_from_youtube --trim` depends on getting it right.
+- **`#AUDIO` is the extended-header equivalent of `#MP3`.** Nothing here reads it yet; tooling that only looks for `#MP3` will miss a chart that uses it.
+- Beat *b* falls at `#GAP + b × 60000/(#BPM×4)` ms from the start of the audio.
 
 ## Scripts
 
@@ -112,6 +122,7 @@ When editing or generating chart files, preserve this exact tag/note syntax — 
     - Trimming runs *after* the length check, so the check still compares the chart against the file its tags describe. `ffmpeg -ss` with `-t` (a duration) rather than `-to`, whose meaning shifts depending on which side of `-i` it sits.
   - It prints a reminder that `#GAP` wants re-checking afterwards. A different source almost always starts at a different offset, and nothing here can verify that automatically — the chart's timing is only as good as the audio it was written against.
 - `utils/youtube.py` — **not a script**; `parse_video_id`, `require`, `fetch`, shared by both download scripts. yt-dlp is run through `uv run --with yt-dlp` rather than imported, so it need not be a declared dependency of either script and the version is always current. Callers pass their own format selection (`-f bestvideo` against `-f bestaudio/best -x`); `fetch` reads the final path back from yt-dlp with `--print after_move:filepath` rather than assuming an extension, since the container depends on the format chosen and, for audio, on what it transcoded to.
+- `find_missing_stems.py` — lists songs with no usable `vocals.ogg`+`instrumental.ogg` pair, in two categories that want different fixes: `none` (no stems, split again by `has-source`/`no-source` on whether there is a full mix to separate from) and `partial` (exactly one of the pair, which separation never produces — a data problem, not a state). **A `has-source` listing is `split_audio_stems.py`'s work queue**; `no-source` needs `extract_audio_from_youtube.py` first. Read-only on purpose: separating a library is an hours-long job to start deliberately, not as a side effect of asking what is missing. Says nothing about stems that exist but disagree with their mix — that is `prune_desynced_stems.py`'s question, correctness rather than presence.
 - `find_missing_usdb.py` — lists song folders with no `<youtube-id>.usdb` marker file (i.e. not yet cross-referenced against USDB), sorted, one per line on stdout with a count on stderr; redirect it to regenerate `usdb-missing.txt`. Emits bare `<Artist> - <Title>` folder names by default, since that's how songs are matched against USDB; `--full-paths` prints full paths instead. Skips dot-directories, so a stray `songs/.claude` isn't a false positive.
 
 ## Working conventions

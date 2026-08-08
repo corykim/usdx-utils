@@ -7,13 +7,13 @@
 
 Two separate problems, since they need different fixes:
 
-  none      no stems at all -- a candidate for running Melody Mania
-            separation, if there's a full mix to separate. Split further by
+  none      no stems at all -- a candidate for split_audio_stems.py, if
+            there's a full mix to separate. Split further by
             --category has-source|no-source: has-source means a full mix
             exists to run separation on, no-source means there isn't one to
-            separate from (nothing this script -- or Melody Mania -- can do
-            without audio first; likely already listed by
-            find_missing_audio.py). Both are subsets of none, not
+            separate from (nothing can be separated without audio first;
+            likely already listed by find_missing_audio.py, and fixable with
+            extract_audio_from_youtube.py). Both are subsets of none, not
             additional songs.
   partial   exactly one of vocals.ogg/instrumental.ogg is present -- the
             other was deleted, never finished separating, or the pair
@@ -24,8 +24,11 @@ Deliberately does not flag stems that exist but disagree with their folder's
 full mix -- that's prune_desynced_stems.py's job, a different, correctness
 question rather than a presence one.
 
-Read-only: there is no automated fix for a missing stem (Melody Mania is a
-manual, external separation step), so there is no --write here.
+Read-only, but no longer for want of a fix: split_audio_stems.py separates a
+folder's full mix on the GPU and tags the charts, so a `has-source` listing
+here is its work queue. This script only reports, because separating a
+library is an hours-long job to start deliberately rather than as a side
+effect of asking what is missing -- hence no --write.
 
 Prints one entry per line, sorted, to stdout with a summary on stderr:
 

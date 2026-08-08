@@ -43,12 +43,25 @@ Note lines:
 
 - `: <beat> <length> <pitch> <text>` — normal sung note
 - `* <beat> <length> <pitch> <text>` — golden (bonus) note
-- `F <beat> <length> <pitch> <text>` — freestyle note
+- `R` / `G` — rap and golden rap notes, which carry no meaningful pitch
+- `F <beat> <length> <pitch> <text>` — freestyle note: no pitch, and scores nothing
 - `- <beat>` — line break
 - `P1` / `P2` — marks the start of a part for duet songs, splitting the chart between two singers
 - `E` — end of file
 
 These files are consumed by UltraStar-family game clients (UltraStar Deluxe, Vocaluxe, etc.), not by anything in this repo.
+
+[The UltraStar File Format (v1)](https://github.com/UltraStar-Deluxe/format/blob/main/The%20UltraStar%20File%20Format%20(v1).md) is the authoritative definition, and worth consulting rather than inferring from the files here — a few of its rules are genuinely surprising:
+
+| | |
+|---|---|
+| `#GAP` | milliseconds from the start of the audio to beat 0 |
+| `#START` | **seconds** — where playback begins |
+| `#END` | **milliseconds** — where playback stops |
+| `#VIDEOGAP` | seconds; **positive delays the video**, negative skips that much of its start |
+| `#AUDIO` | the newer equivalent of `#MP3` |
+
+The `#VIDEOGAP` sign is the one to be careful with. This library contains both signs, and the largest positive values sit with videos that plainly carry extra footage — which suggests the opposite reading to the correct one. Beat *b* falls at `#GAP + b × 60000/(#BPM×4)` ms.
 
 ## Scripts
 
@@ -275,6 +288,15 @@ Every script defaults to a **dry run** and needs `--write` to change anything.
   Cutting T seconds off the front moves `#GAP` and `#END` earlier by T and retires `#START`, since all of them are measured from the start of the file. `#VIDEOGAP` moves the opposite way: it is the video's delay relative to the audio, so with the audio now starting later in the song the video has to skip the same amount to stay level, and the value goes down. `#GAP:30000` with `#VIDEOGAP:5` becomes `#GAP:10000` with `#VIDEOGAP:-15` — both put the same video frame on beat 0. That sign is taken from the [format spec](https://github.com/UltraStar-Deluxe/format), not guessed from the library, which contains both signs and would have suggested the wrong one.
 
   Unlike a video, the result's **length is checked against the chart**. A background video legitimately runs longer or shorter than the song, but `#MP3` is the audio the notes are timed against, so a chart whose singing runs past the end of the file is being played against the wrong recording — a radio edit, another live take, the wrong song. `#END` is respected, since playback stops there and notes beyond it are never reached. A download that fails the check is deleted and reported; `--force` keeps it. Afterwards it reminds you to re-check `#GAP`, because a different source almost always starts at a different offset and nothing here can verify that for you.
+
+- **`scripts/find_missing_stems.py`** — lists songs with no usable `vocals.ogg` + `instrumental.ogg` pair, separated into two problems because they need different fixes. **`none`** is a song with no stems at all, split again by `--category has-source|no-source` depending on whether there's a full mix to separate from; a `has-source` listing is precisely the work queue for `split_audio_stems.py`, while `no-source` needs audio fetching first. **`partial`** is a song with exactly one of the two files — separation always produces both, so that's a data problem rather than a normal state.
+
+  ```bash
+  uv run scripts/find_missing_stems.py --category has-source   # ready to separate
+  uv run scripts/find_missing_stems.py --category partial --details
+  ```
+
+  Read-only, and deliberately so: separating a library is an hours-long job worth starting on purpose rather than as a side effect of asking what's missing. It also doesn't flag stems that exist but disagree with their mix — that's `prune_desynced_stems.py`'s question, about correctness rather than presence.
 
 - **`scripts/find_missing_usdb.py`** — lists every song folder that has no `<youtube-id>.usdb` marker file, i.e. hasn't been cross-referenced against USDB yet. Prints one bare `<Artist> - <Title>` folder name per line (sorted) to stdout — the form songs are matched against USDB in — with a count on stderr, so it can be redirected straight into `usdb-missing.txt`. Pass `--full-paths` for full paths instead, or a directory to scan somewhere other than `songs/`.
 
