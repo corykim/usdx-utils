@@ -58,7 +58,7 @@ def require() -> None:
     try:
         result = subprocess.run(
             ["uv", "run", "--with", "yt-dlp", "yt-dlp", "--version"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -91,7 +91,7 @@ def fetch(video_id: str, dest_stem: Path, format_args: list[str], *, timeout: in
             "--print", "after_move:filepath",
             f"https://www.youtube.com/watch?v={video_id}",
         ],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(

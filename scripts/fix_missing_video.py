@@ -93,7 +93,7 @@ def probe_has_video_stream(path: Path) -> bool:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
          "stream=codec_type", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return "video" in result.stdout
 

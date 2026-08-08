@@ -137,7 +137,7 @@ def audio_duration(path: Path) -> float | None:
                 str(path),
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=60,
         )
         if proc.returncode == 0:
@@ -218,7 +218,7 @@ def has_audio_stream(path: Path) -> bool | None:
                 str(path),
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):

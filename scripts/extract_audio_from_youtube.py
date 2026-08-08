@@ -213,7 +213,7 @@ def extract_from_file(source: Path, dest_stem: Path, audio_format: str) -> Path:
     result = subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-vn", *encoder, str(destination)],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         detail = result.stderr.strip().splitlines()
@@ -297,7 +297,7 @@ def trim_audio(audio: Path, start: float, stop: float | None, audio_format: str)
         argv += ["-t", f"{stop - start:.3f}"]
     argv += ["-i", str(audio), "-vn", *LOCAL_ENCODERS.get(audio_format, []), str(staged)]
 
-    result = subprocess.run(argv, capture_output=True, text=True)
+    result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         staged.unlink(missing_ok=True)
         detail = result.stderr.strip().splitlines()

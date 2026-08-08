@@ -227,7 +227,7 @@ def stage_input(mix: Path, workdir: Path) -> Path:
     result = subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-i", str(mix), "-ac", "2", "-c:a", "pcm_s16le", str(staged)],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         # ffmpeg's own complaint, not the whole command line: this ends up in

@@ -47,17 +47,40 @@ ffmpeg-normalize will only tell you a gain by writing it. Rewriting a file
 with the number it already had costs a fresh modification time, and a sync
 that compares timestamps would then resend the whole library for nothing.
 
+Reading an existing tag has to understand every container's spelling of it --
+`replaygain_track_gain` in a Vorbis comment, `TXXX:REPLAYGAIN_TRACK_GAIN` in
+ID3, `----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN` in MP4. Matching only the
+bare lowercase name found nothing outside the Ogg files, so every mp3 and m4a
+mix looked untagged however often it had been tagged and was measured from
+scratch on each run.
+
+Some files push loudnorm into dynamic mode, which is what the true-peak
+warning ffmpeg-normalize prints is about. There is then no single linear gain
+for it to record, so it writes nothing while logging that it did, and the
+song came back unmeasurable and stayed untagged. ReplayGain is target minus
+integrated loudness, which is defined whatever the filter would have done to
+the audio, so that is computed here instead when the normal path yields
+nothing -- within 0.04 dB of the tags usdb_syncer wrote.
+
+A song that genuinely cannot be measured leaves a .replaygain-failed.json
+memo naming the audio it failed on, and later runs skip it, saying so unless
+--terse. --force ignores the memo and tries again, and any run that succeeds
+deletes it.
+
 Defaults to a dry run; pass --write to tag anything.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import mutagen
@@ -80,13 +103,95 @@ TARGET_LUFS_OPUS = -23.0
 GAIN_KEY = "replaygain_track_gain"
 PEAK_KEY = "replaygain_track_peak"
 
+# Left in a song folder when a reference could not be measured at all, so a
+# later run skips it instead of paying the same failed decode again.
+FAILURE_MEMO_NAME = ".replaygain-failed.json"
+
+
+def measure_loudness(path: Path) -> tuple[float, float] | None:
+    """Integrated loudness and true peak, from one loudnorm analysis pass."""
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-v", "info", "-i", str(path),
+         "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr or "", re.S)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return float(data["input_i"]), float(data["input_tp"])
+    except (ValueError, KeyError):
+        return None
+
+
+def write_gain_tags(path: Path, gain: str, peak: str | None) -> None:
+    """Write ReplayGain tags in whatever spelling this container uses."""
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        from mutagen.id3 import ID3, TXXX, ID3NoHeaderError
+
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=[gain]))
+        if peak:
+            tags.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK", text=[peak]))
+        tags.save(path)
+        return
+    if suffix in (".m4a", ".mp4"):
+        from mutagen.mp4 import MP4, MP4FreeForm
+
+        audio = MP4(path)
+        audio["----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN"] = [MP4FreeForm(gain.encode())]
+        if peak:
+            audio["----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK"] = [MP4FreeForm(peak.encode())]
+        audio.save()
+        return
+    audio = mutagen.File(path)          # ogg / opus / flac all take plain comments
+    audio[GAIN_KEY] = [gain]
+    if peak:
+        audio[PEAK_KEY] = [peak]
+    audio.save()
+
 
 def target_for(path: Path) -> float:
     return TARGET_LUFS_OPUS if path.suffix.lower() == ".opus" else TARGET_LUFS
 
 
+def _tag_text(value: object) -> str | None:
+    """One readable string out of whatever mutagen hands back for a tag.
+
+    Each container wraps the value differently: a Vorbis comment is a list of
+    str, an ID3 TXXX frame is an object with .text, and an MP4 freeform atom
+    is a list of bytes.
+    """
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace").strip()
+    text = getattr(value, "text", None)  # ID3 TXXX
+    if text is not None:
+        if isinstance(text, list):
+            text = text[0] if text else None
+        return None if text is None else str(text).strip()
+    return str(value).strip()
+
+
 def read_gain(path: Path) -> str | None:
-    """The file's existing ReplayGain track gain, as written, or None."""
+    """The file's existing ReplayGain track gain, as written, or None.
+
+    The key is spelled differently in every container -- `replaygain_track_gain`
+    in a Vorbis comment, `TXXX:REPLAYGAIN_TRACK_GAIN` in ID3,
+    `----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN` in MP4 -- so matching the
+    bare lowercase name only ever found the Ogg files. Everything else looked
+    untagged however often it had been tagged, which meant re-measuring 366
+    mp3 and m4a mixes from scratch on every run and rewriting tags that were
+    already right.
+    """
     try:
         tags = mutagen.File(path)
     except Exception:
@@ -94,12 +199,13 @@ def read_gain(path: Path) -> str | None:
     if tags is None:
         return None
     try:
-        value = dict(tags).get(GAIN_KEY)
+        items = dict(tags)
     except Exception:
         return None
-    if isinstance(value, list):
-        value = value[0] if value else None
-    return str(value) if value else None
+    for key, value in items.items():
+        if str(key).lower().rsplit(":", 1)[-1] == GAIN_KEY:
+            return _tag_text(value) or None
+    return None
 
 
 def measure_peak(path: Path) -> str | None:
@@ -110,7 +216,7 @@ def measure_peak(path: Path) -> str | None:
         ["ffmpeg", "-hide_banner", "-nostats", "-v", "info",
          "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     for line in (result.stderr or "").splitlines():
         if "max_volume:" in line:
@@ -140,7 +246,35 @@ def scan_gain(path: Path) -> str | None:
         replaygain=True,
     )
     normalizer.add_media_file(str(path), os.devnull)
-    normalizer.run_normalization()
+    try:
+        normalizer.run_normalization()
+    except Exception:
+        # Undecodable input raises here rather than returning nothing. Fall
+        # through: the measuring pass below reports the same failure as a
+        # None, which the caller turns into a memo instead of a traceback.
+        pass
+    written = read_gain(path)
+    if written is not None:
+        return written
+
+    # Some files push loudnorm into dynamic mode -- the true-peak warning
+    # ffmpeg-normalize prints is about exactly this. There is then no single
+    # linear gain for it to record, and it writes nothing while logging that
+    # it did, so the song came back "unmeasurable" and stayed untagged run
+    # after run. ReplayGain is target minus integrated loudness, which is
+    # defined whatever the filter would have done to the audio, so it is
+    # computed here instead. Measured against tags usdb_syncer wrote, this
+    # agrees to within 0.04 dB -- inaudible, and only used where the normal
+    # path produced nothing at all.
+    measured = measure_loudness(path)
+    if measured is None:
+        return None
+    integrated, true_peak = measured
+    gain = f"{target_for(path) - integrated:.2f} dB"
+    try:
+        write_gain_tags(path, gain, f"{10 ** (true_peak / 20):.6f}")
+    except Exception:
+        return None
     return read_gain(path)
 
 
@@ -177,7 +311,7 @@ def reconstruct_mix(stems: list[Path], workdir: Path) -> Path:
         "-filter_complex", f"amix=inputs={len(stems)}:duration=longest:normalize=0",
         "-c:a", "libvorbis", "-q:a", "8", str(destination),
     ]
-    result = subprocess.run(argv, capture_output=True, text=True)
+    result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         detail = result.stderr.strip().splitlines()
         raise RuntimeError(
@@ -203,6 +337,86 @@ def write_stem_tags(stem: Path, gain: str, *, write: bool) -> str | None:
     return f"{stem.name} -> {GAIN_KEY}={gain}" + (f", {PEAK_KEY}={peak}" if peak else "")
 
 
+def concise_error(error: object) -> str:
+    """The one useful line out of a wall of ffmpeg banner text.
+
+    ffmpeg-normalize raises with the whole command line and ffmpeg's build
+    configuration attached -- two thousand characters of which one matters.
+    Storing that verbatim makes the memo unreadable and the log useless.
+    """
+    text = str(error).replace("\\r\\n", "\n").replace("\\n", "\n")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if any(word in lowered for word in ("error", "invalid", "no such", "failed")):
+            return line[:200]
+    return (lines[-1] if lines else text)[:200]
+
+
+def reference_fingerprint(song_dir: Path) -> str:
+    """Identify what a failure was about, by name and size like the other memos.
+
+    Replace the audio and the memo stops applying by itself, so a re-download
+    is retried without anyone having to remember to clear anything.
+    """
+    mix = audio_lengths.find_full_mix(song_dir)
+    parts = []
+    for path in ([mix] if mix else []) + stems_in(song_dir):
+        try:
+            parts.append(f"{path.name}|{path.stat().st_size}")
+        except OSError:
+            parts.append(path.name)
+    return ";".join(parts)
+
+
+def failure_recorded_for(song_dir: Path) -> str | None:
+    """Why this exact audio failed before, if it did."""
+    try:
+        memo = json.loads((song_dir / FAILURE_MEMO_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(memo, dict) and memo.get("audio") == reference_fingerprint(song_dir):
+        return str(memo.get("error", "(no reason recorded)"))
+    return None
+
+
+def write_failure_memo(song_dir: Path, error: str) -> None:
+    payload = {
+        "audio": reference_fingerprint(song_dir),
+        "error": error[:2000],
+        "failed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "note": (
+            "Written by apply_replaygain.py. Delete this file, or pass --force, "
+            "to measure this song again."
+        ),
+    }
+    try:
+        (song_dir / FAILURE_MEMO_NAME).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass  # a memo that cannot be written is not worth failing the run over
+
+
+def clear_failure_memo(song_dir: Path) -> None:
+    (song_dir / FAILURE_MEMO_NAME).unlink(missing_ok=True)
+
+
+def unmeasurable(song_dir: Path, *, terse: bool) -> str:
+    """Record that this song's loudness could not be established, and say so.
+
+    Measuring is the expensive half of a run -- a full decode, sometimes two
+    -- so a song that cannot be measured should not be re-attempted on every
+    pass. The memo names the audio it failed on, so replacing the file clears
+    it automatically.
+    """
+    reason = "could not measure the reference loudness"
+    write_failure_memo(song_dir, reason)
+    if not terse:
+        print(f"    {reason}; recorded in {FAILURE_MEMO_NAME}")
+    return "unmeasurable"
+
+
 def stems_in(song_dir: Path) -> list[Path]:
     return [
         p for p in sorted(song_dir.iterdir())
@@ -216,6 +430,17 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
     stems = stems_in(song_dir)
     if mix is None and not stems:
         return "nothing to tag"
+
+    if not force:
+        previously = failure_recorded_for(song_dir)
+        if previously is not None:
+            # Said out loud unless --terse: a song silently skipped forever is
+            # indistinguishable from one that is fine. --force ignores the memo
+            # and measures it again.
+            if not terse:
+                print(f"    SKIPPED, failed before: {previously}"
+                      f"  (--force to retry)")
+            return "failed before"
 
     reported: list[str] = []
     gain = None
@@ -233,14 +458,14 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
         elif existing is None:
             gain = scan_gain(mix)          # nothing there yet, so write directly
             if gain is None:
-                return "unmeasurable"
+                return unmeasurable(song_dir, terse=terse)
             reported.append(f"{mix.name} -> {GAIN_KEY}={gain}")
         else:
             # --force over an existing tag: measure on a copy first, so a value
             # that turns out to be the same leaves the file entirely alone.
             gain = measure_gain(mix)
             if gain is None:
-                return "unmeasurable"
+                return unmeasurable(song_dir, terse=terse)
             if gain == existing:
                 reported.append(f"{mix.name} re-measured, unchanged at {existing}")
             else:
@@ -258,7 +483,7 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
                     return "failed"
                 gain = scan_gain(reference)
             if gain is None:
-                return "unmeasurable"
+                return unmeasurable(song_dir, terse=terse)
             reported.append(f"(reference rebuilt from {len(stems)} stems) {GAIN_KEY}={gain}")
         else:
             reported.append(f"would rebuild a reference from {len(stems)} stems and measure it")
@@ -279,8 +504,16 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
         else:
             reported.append(f"{len(needing)} stem(s) would take the mix's gain")
 
+    # Getting this far means a gain was established, so any memo describing a
+    # past failure is describing something that is no longer true. It must
+    # never outlive the problem, or the song stays skipped forever.
+    if write and gain is not None:
+        clear_failure_memo(song_dir)
+
+    # The folder name is printed by the caller before any of this runs, so a
+    # song that takes a while to measure is named while it is being measured
+    # rather than after.
     if reported and not terse:
-        print(f"{song_dir.name}")
         for line in reported:
             print(f"    {line}")
     return outcome
@@ -291,11 +524,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--songs-dir", type=Path, default=repo_root / "songs")
     parser.add_argument(
-        "--dir", default=None, metavar="SONG",
-        help=f"tag only one song -- {song_folders.HELP}",
+        "song", nargs="?", default=None,
+        help=f"tag only one song -- {song_folders.HELP}. Omit to scan the library.",
     )
+    parser.add_argument("--songs-dir", type=Path, default=repo_root / "songs")
     parser.add_argument("--limit", type=int, default=None, help="stop after this many songs")
     parser.add_argument(
         "--force", action="store_true",
@@ -310,9 +543,9 @@ def main() -> int:
         print("error: ffmpeg is not on PATH", file=sys.stderr)
         return 1
 
-    if args.dir is not None:
+    if args.song is not None:
         try:
-            song_dirs = [song_folders.resolve(args.dir, args.songs_dir)]
+            song_dirs = [song_folders.resolve(args.song, args.songs_dir)]
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -331,14 +564,25 @@ def main() -> int:
     print(f"[{mode}] {len(song_dirs)} song folder(s)\n")
 
     tallies: dict[str, int] = {}
-    for song_dir in song_dirs:
+    for index, song_dir in enumerate(song_dirs, start=1):
+        # Named before the work, not after: measuring a stem means decoding it
+        # whole, so a song can hold the run for a second or two and there is
+        # otherwise nothing on screen to say which one.
+        if not args.terse:
+            print(f"[{index}/{len(song_dirs)}] {song_dir.name}", flush=True)
         try:
             outcome = process(song_dir, force=args.force, terse=args.terse, write=args.write)
         except KeyboardInterrupt:
             print("\ninterrupted; tags already written are kept")
             return 130
         except Exception as exc:  # one odd file should not end the run
-            print(f"  {song_dir.name}: FAILED {exc}", file=sys.stderr)
+            reason = concise_error(exc)
+            print(f"    FAILED: {reason}")
+            print(f"{song_dir.name}: {reason}", file=sys.stderr)
+            # Memo this too, not just the clean "could not measure" path: an
+            # exception is still a song that will fail the same way tomorrow.
+            if args.write:
+                write_failure_memo(song_dir, reason)
             outcome = "failed"
         tallies[outcome] = tallies.get(outcome, 0) + 1
 

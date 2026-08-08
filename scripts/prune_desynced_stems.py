@@ -172,6 +172,11 @@ def main() -> int:
         # Both stems come out of one separation run, so measuring either
         # settles it; prefer the instrumental.
         probe = next((s for s in stems if s.name.lower() != "vocals.ogg"), stems[0])
+        # Named before the measuring, not after. ffprobe on a cold cache is
+        # the slow part of this run, and a folder that stalls it should say
+        # which one it is while it is stalling.
+        if not args.terse:
+            print(f"measuring: {song_dir.name}", flush=True)
         stem_duration = audio_lengths.audio_duration(probe)
         mix_duration = audio_lengths.audio_duration(full_mix)
         if stem_duration is None or mix_duration is None:
