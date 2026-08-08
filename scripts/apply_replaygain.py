@@ -474,7 +474,19 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
     else:
         # Stems but no mix: rebuild the reference rather than measure a stem,
         # so these folders are normalized by the same rule as every other.
-        if write:
+        #
+        # There is nowhere to keep that answer, though. A folder with a mix
+        # stores the gain on the mix and a later run just reads it back; here
+        # the reference is a temp file that is thrown away, so the rebuild and
+        # its two-pass measurement were repeated on every single run -- for
+        # all 41 of these folders -- only to conclude the stems already had
+        # the value. The stems themselves are the record: if they agree on a
+        # gain, that *is* the folder's gain and nothing needs measuring.
+        agreed = {read_gain(stem) for stem in stems}
+        if not force and len(agreed) == 1 and None not in agreed:
+            gain = agreed.pop()
+            reported.append(f"stems already agree on {GAIN_KEY}={gain}; nothing to rebuild")
+        elif write:
             with tempfile.TemporaryDirectory(prefix="rg-") as tmp:
                 try:
                     reference = reconstruct_mix(stems, Path(tmp))
