@@ -46,15 +46,26 @@ replacing the mix retries it automatically. --retry-failed ignores the memos,
 --terse skips them without a word, and a successful separation deletes any
 memo it finds -- it should never outlive the problem it describes.
 
+There is no GPU requirement as such -- audio-separator falls back through
+CUDA, Apple MPS, DirectML, and finally CPU, so this runs anywhere. It is the
+speed that makes a GPU the point: on one 30s clip, the same model took 11s on
+an RTX 5070 and 132s on a 48-core CPU, and a machine with an ordinary core
+count is slower still. A --write run that lands on the CPU therefore stops
+and asks for --allow-cpu first, rather than quietly starting something that
+would take days. --use-directml opts into the experimental AMD/Intel path,
+which additionally needs torch-directml in the dependency header above.
+
 Defaults to a dry run; pass --write to actually separate anything.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -277,7 +288,7 @@ def tag_charts(song_dir: Path, *, write: bool) -> list[str]:
     return notes
 
 
-def build_separator(model: str, model_dir: Path, *, quiet: bool):
+def build_separator(model: str, model_dir: Path, *, quiet: bool, use_directml: bool = False):
     """Import and initialise audio-separator. Imported lazily so a dry run
     doesn't pay ~10s of torch import time to print a list of folder names."""
     from audio_separator.separator import Separator
@@ -288,9 +299,45 @@ def build_separator(model: str, model_dir: Path, *, quiet: bool):
         output_format="ogg",
         output_bitrate=OUTPUT_BITRATE,
         log_level=logging.WARNING if quiet else logging.INFO,
+        use_directml=use_directml,
     )
     separator.load_model(model_filename=model)
     return separator
+
+
+def any_directml_installed() -> bool:
+    return importlib.util.find_spec("torch_directml") is not None
+
+
+def describe_device() -> tuple[str, bool]:
+    """What the model will actually run on, and whether that is a GPU.
+
+    audio-separator picks the device itself and only says so in an INFO log
+    the quiet default hides, so the same check is made here to say it plainly
+    -- landing on CPU is the difference between a night's work and a week's,
+    and it is worth knowing before the run rather than after.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        try:
+            return f"CUDA ({torch.cuda.get_device_name(0)})", True
+        except Exception:
+            return "CUDA", True
+    if (
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+        and platform.processor() == "arm"
+    ):
+        return "Apple MPS", True
+    try:
+        import torch_directml
+
+        if torch_directml.is_available():
+            return "DirectML", True
+    except ImportError:
+        pass
+    return "CPU", False
 
 
 def list_models() -> int:
@@ -357,6 +404,18 @@ def main() -> int:
         help=f"ignore {FAILURE_MEMO_NAME} memos and retry songs that failed before",
     )
     parser.add_argument(
+        "--use-directml",
+        action="store_true",
+        help="allow DirectML (AMD/Intel graphics on Windows) when there is no CUDA "
+             "device; experimental, and needs `uv add torch-directml` in the script header",
+    )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="proceed even with no GPU. Separation still works on CPU, measured "
+             "12x slower here, so a library-wide run becomes days rather than hours",
+    )
+    parser.add_argument(
         "--verbose", action="store_true", help="show audio-separator's own INFO logging"
     )
     parser.add_argument("--write", action="store_true", help="actually separate and install stems")
@@ -414,15 +473,40 @@ def main() -> int:
     if not candidates:
         return 0
 
+    device, accelerated = describe_device()
+    print(f"[{mode}] device: {device}")
+    if not accelerated:
+        print(
+            "\nNo GPU is available, so this would run on the CPU. Measured on the "
+            "same 30s clip and the same model, a 48-core machine took 132s against "
+            "11s on an RTX 5070 -- 12x slower, and about 4x slower than realtime. "
+            "Fewer cores are worse again, so a song becomes many minutes and a "
+            "library-wide pass becomes days."
+        )
+        if not any_directml_installed():
+            print(
+                "For AMD or Intel graphics on Windows there is experimental "
+                "DirectML support: add torch-directml to this script's dependency "
+                "header and pass --use-directml."
+            )
+        elif not args.use_directml:
+            print("DirectML is installed but off; pass --use-directml to try it.")
+        if args.write and not args.allow_cpu:
+            print("\nRefusing to start a CPU run by accident. Pass --allow-cpu to go ahead.")
+            return 2
+
     if not args.write:
         for song_dir, mix in candidates:
             print(f"would separate: {song_dir.name}  <-  {mix.name}")
-        print(f"\nRe-run with --write to separate. Expect roughly a minute of GPU time per song.")
+        verb = "roughly a minute of GPU time" if accelerated else "many minutes of CPU time"
+        print(f"\nRe-run with --write to separate. Expect {verb} per song.")
         return 0
 
     print(f"[{mode}] loading {args.model} ...")
     load_started = time.monotonic()
-    separator = build_separator(args.model, args.model_dir, quiet=not args.verbose)
+    separator = build_separator(
+        args.model, args.model_dir, quiet=not args.verbose, use_directml=args.use_directml
+    )
     print(f"[{mode}] model ready in {time.monotonic() - load_started:.1f}s\n")
 
     done = failed = 0
