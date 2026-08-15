@@ -423,6 +423,11 @@ def main() -> int:
         help=f"yt-dlp --audio-format value (default: {DEFAULT_AUDIO_FORMAT})",
     )
     parser.add_argument(
+        "--extractor-args", default="youtube:player-client=web_embedded,web,tv",
+        metavar="EXTRACTOR_ARGS",
+        help="yt-dlp --extractor-args value (default: youtube:player-client=web_embedded,web,tv)",
+    )
+    parser.add_argument(
         "--trim", action="store_true",
         help="Cut the result down to the song, using #START/#END, and shift "
              "#GAP/#END/#VIDEOGAP to match.",
@@ -535,7 +540,8 @@ def main() -> int:
                 dest_stem,
                 ["-f", "bestaudio/best", "-x",
                  "--audio-format", args.audio_format,
-                 "--audio-quality", "0"],
+                 "--audio-quality", "0",
+                 "--extractor-args", args.extractor_args],
             )
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)

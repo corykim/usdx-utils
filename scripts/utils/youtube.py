@@ -13,6 +13,7 @@ scripts/utils/ with the other import-only modules. A script run as
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -92,6 +93,7 @@ def fetch(video_id: str, dest_stem: Path, format_args: list[str], *, timeout: in
             f"https://www.youtube.com/watch?v={video_id}",
         ],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
     if result.returncode != 0:
         raise RuntimeError(

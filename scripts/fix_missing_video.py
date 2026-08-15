@@ -59,6 +59,7 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
+
 def declares_missing_video(chart: Path, song_dir: Path) -> bool:
     """Whether the chart's #VIDEO names a file that isn't in the folder.
 
@@ -98,16 +99,39 @@ def probe_has_video_stream(path: Path) -> bool:
     return "video" in result.stdout
 
 
+def video_id_from_marker(song_dir: Path) -> str | None:
+    """Read the v= source id from the folder's .usdb marker, if present."""
+    for marker in sorted(song_dir.glob("*.usdb")):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        for token in str(payload.get("meta_tags", "")).split(","):
+            if "=" in token:
+                key, _, value = token.partition("=")
+                if key.strip() == "v" and value.strip():
+                    return value.strip()
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("song", help=song_folders.HELP)
-    parser.add_argument("youtube", help="YouTube URL or bare 11-char video id")
+    parser.add_argument(
+        "youtube", nargs="?", default=None,
+        help="YouTube URL or bare 11-char video id; omit to read v= from the .usdb marker",
+    )
     parser.add_argument(
         "--songs-dir", type=Path,
         default=Path(__file__).resolve().parent.parent / "songs",
         help="Directory containing one song folder per subdirectory (default: ../songs)",
+    )
+    parser.add_argument(
+        "--extractor-args", default="youtube:player-client=web_embedded,web,tv",
+        metavar="EXTRACTOR_ARGS",
+        help="yt-dlp --extractor-args value (default: youtube:player-client=web_embedded,web,tv)",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -121,13 +145,22 @@ def main() -> int:
         return 1
 
     try:
-        video_id = youtube.parse_video_id(args.youtube)
+        song_dir = song_folders.resolve(args.song, args.songs_dir)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    raw_id = args.youtube
+    if raw_id is None:
+        raw_id = video_id_from_marker(song_dir)
+        if raw_id is None:
+            print("error: no YouTube id given and no v= found in .usdb marker",
+                  file=sys.stderr)
+            return 1
+        print(f"video id from .usdb marker: {raw_id}")
+
     try:
-        song_dir = song_folders.resolve(args.song, args.songs_dir)
+        video_id = youtube.parse_video_id(raw_id)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -185,7 +218,10 @@ def main() -> int:
     try:
         # Video only: UltraStar plays the background muted, so an audio
         # track would be wasted bandwidth and a second source of sound.
-        video_path = youtube.fetch(video_id, dest_stem, ["-f", "bestvideo"])
+        video_path = youtube.fetch(
+            video_id, dest_stem,
+            ["-f", "bestvideo", "--extractor-args", args.extractor_args],
+        )
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
