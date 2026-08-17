@@ -80,14 +80,21 @@ def probe_audio(path: Path) -> dict | None:
     """Run ffprobe on path and return a dict of relevant fields, or None on failure.
 
     Returned keys (all present if ffprobe can report them):
-        filename, duration_s, codec, sample_rate_hz, channels,
-        bit_rate_kbps, size_bytes
+        filename, duration_s, codec, sample_rate_hz, sample_rate_khz,
+        channels, bits_per_sample, sample_format, bit_rate_kbps, size_bytes
+
+    bits_per_sample is only present for lossless formats (WAV, FLAC, etc.);
+    lossy codecs (Vorbis, MP3, AAC) don't have a raw bit depth.
+    sample_format is the internal decoded format, e.g. "fltp" (32-bit float
+    planar, used by Vorbis/AAC), "s16" (signed 16-bit PCM), "s32".
     """
     try:
         proc = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "stream=codec_name,codec_type,sample_rate,channels,bit_rate",
+                "-show_entries",
+                "stream=codec_name,codec_type,sample_rate,channels,"
+                "bit_rate,bits_per_raw_sample,sample_fmt",
                 "-show_entries", "format=duration,size,bit_rate",
                 "-of", "json",
                 str(path),
@@ -125,6 +132,23 @@ def probe_audio(path: Path) -> dict | None:
                 result[out_key] = coerce(raw_val)
             except (ValueError, TypeError):
                 pass
+
+    # Derive kHz from Hz once we have it.
+    if "sample_rate_hz" in result:
+        result["sample_rate_khz"] = round(result["sample_rate_hz"] / 1000, 1)
+
+    # bits_per_raw_sample is absent or "0" for lossy codecs; skip those.
+    bps_raw = audio_stream.get("bits_per_raw_sample")
+    if bps_raw and str(bps_raw) not in ("N/A", "0", ""):
+        try:
+            result["bits_per_sample"] = int(bps_raw)
+        except (ValueError, TypeError):
+            pass
+
+    # sample_fmt is always present for audio streams ("fltp", "s16", "s32p", …).
+    sample_fmt = audio_stream.get("sample_fmt")
+    if sample_fmt and str(sample_fmt) not in ("N/A", ""):
+        result["sample_format"] = str(sample_fmt)
 
     # Stream-level bitrate is often missing (e.g. Vorbis); format-level is reliable.
     for br_raw in (audio_stream.get("bit_rate"), fmt.get("bit_rate")):
