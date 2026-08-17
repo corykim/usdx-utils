@@ -53,7 +53,7 @@ from find_missing_video import (  # noqa: E402
     read_text_preserving_encoding,
     video_tag_value,
 )
-from utils import song_folders, youtube  # noqa: E402
+from utils import fix_metadata, song_folders, youtube  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -100,10 +100,10 @@ def probe_has_video_stream(path: Path) -> bool:
 
 
 def video_id_from_marker(song_dir: Path) -> str | None:
-    """Read the video source id from the folder's .usdb marker, if present.
+    """Read the video source id from the folder's .usdb marker or fix-metadata.json.
 
-    Prefers v= (video-specific id); falls back to a= (audio/combined id)
-    for entries where the video and audio share one source.
+    Checks .usdb markers first (prefers v=, falls back to a=), then
+    fix-metadata.json for songs not managed by the USDB syncer.
     """
     for marker in sorted(song_dir.glob("*.usdb")):
         try:
@@ -120,7 +120,9 @@ def video_id_from_marker(song_dir: Path) -> str | None:
         result = sources.get("v") or sources.get("a")
         if result:
             return result
-    return None
+
+    vid = str(fix_metadata.read(song_dir).get("video_id", "")).strip()
+    return vid or None
 
 
 def main() -> int:
@@ -246,6 +248,9 @@ def main() -> int:
     for chart in untagged_charts:
         set_video_tag(chart, video_path.name)
         print(f"tagged: {chart.name}")
+
+    if fix_metadata.set_video_id(song_dir, video_id):
+        print(f"wrote {fix_metadata.FILENAME}: video_id={video_id}")
 
     return 0
 

@@ -87,7 +87,7 @@ import mutagen
 from mutagen.oggvorbis import OggVorbis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import audio_lengths, song_folders  # noqa: E402
+from utils import audio_lengths, fix_metadata, song_folders  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -181,6 +181,14 @@ def _tag_text(value: object) -> str | None:
     return str(value).strip()
 
 
+def _parse_gain_db(gain: str) -> float | None:
+    """Parse a gain string like '-9.90 dB' to a float, or None on failure."""
+    try:
+        return float(gain.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 def read_gain(path: Path) -> str | None:
     """The file's existing ReplayGain track gain, as written, or None.
 
@@ -205,6 +213,29 @@ def read_gain(path: Path) -> str | None:
     for key, value in items.items():
         if str(key).lower().rsplit(":", 1)[-1] == GAIN_KEY:
             return _tag_text(value) or None
+    return None
+
+
+def read_peak(path: Path) -> float | None:
+    """The file's stored ReplayGain track peak as a float, or None."""
+    try:
+        tags = mutagen.File(path)
+    except Exception:
+        return None
+    if tags is None:
+        return None
+    try:
+        items = dict(tags)
+    except Exception:
+        return None
+    for key, value in items.items():
+        if str(key).lower().rsplit(":", 1)[-1] == PEAK_KEY:
+            raw = _tag_text(value)
+            if raw:
+                try:
+                    return float(raw.split()[0])
+                except (ValueError, IndexError):
+                    pass
     return None
 
 
@@ -521,6 +552,10 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
     # never outlive the problem, or the song stays skipped forever.
     if write and gain is not None:
         clear_failure_memo(song_dir)
+        gain_db = _parse_gain_db(gain)
+        if gain_db is not None:
+            peak = read_peak(mix) if mix is not None else None
+            fix_metadata.set_replaygain(song_dir, gain_db, peak)
 
     # The folder name is printed by the caller before any of this runs, so a
     # song that takes a while to measure is named while it is being measured
