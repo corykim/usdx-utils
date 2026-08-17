@@ -13,7 +13,6 @@ Typical structure:
     {
       "filename": "Song Name.ogg",
       "size_bytes": 12345678,
-      "video_id": "SXKlJuO07eM",
       "replaygain": {
         "track_gain_db": -9.90,
         "track_peak": 0.997600
@@ -26,15 +25,27 @@ Typical structure:
         "channels": 2,
         "sample_format": "fltp",
         "bit_rate_kbps": 192.0
+      },
+      "video": {
+        "id": "SXKlJuO07eM",
+        "filename": "Song Name.mp4",
+        "size_bytes": 73456789,
+        "duration_s": 252.32,
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "fps": 25.0,
+        "bit_rate_kbps": 2313.7,
+        "pixel_format": "yuv420p",
+        "major_brand": "mp42"
       }
     }
 
-filename and size_bytes sit at the root because they are attributes of the
-file itself, not of its audio content. size_bytes is used by the staleness
-check: on every write, the recorded size is compared against the real file;
-if they differ, all file-derived sections (filename, size_bytes, audio,
-replaygain) are cleared so stale data cannot persist after a file is
-replaced.
+filename and size_bytes (root-level) are attributes of the primary audio
+file. The video section has its own filename and size_bytes. Both use a
+staleness check: on every write the recorded size is compared against the
+real file; if they differ, file-derived fields are cleared (audio and
+replaygain for audio; all video fields except id for video).
 
 To pre-populate the audio section for existing songs, call backfill_audio():
 
@@ -76,25 +87,54 @@ _FILE_DEPENDENT_KEYS = frozenset({"filename", "size_bytes", "audio", "replaygain
 
 
 def _drop_stale_sections(song_dir: Path, current: dict) -> tuple[dict, bool]:
-    """If the recorded audio file size no longer matches, drop file-dependent keys.
+    """Clear file-derived sections when the recorded file sizes no longer match.
+
+    Checks both audio (root filename/size_bytes) and video (video.filename/
+    video.size_bytes). Audio staleness drops filename, size_bytes, audio, and
+    replaygain. Video staleness drops all video probe fields but keeps video.id
+    so the YouTube id is not lost when the file is replaced.
 
     Returns (possibly-cleaned dict, True if anything was dropped).
-    filename and size_bytes live at the root and are set from the filesystem
-    by set_audio(), not derived from ffprobe. If either is absent the check
-    is skipped -- we can't verify what we haven't recorded yet.
+    The check is skipped for a section when the size has not been recorded yet.
+    Files that are gone or unreadable are left alone rather than invalidated
+    blindly, since a transient error should not wipe measurements.
     """
+    invalidated = False
+
+    # Audio staleness
     filename = current.get("filename")
     stored_size = current.get("size_bytes")
-    if not filename or stored_size is None:
-        return current, False
-    try:
-        actual_size = (song_dir / filename).stat().st_size
-    except OSError:
-        return current, False  # file gone or unreadable; don't invalidate blindly
-    if actual_size == stored_size:
-        return current, False
-    cleaned = {k: v for k, v in current.items() if k not in _FILE_DEPENDENT_KEYS}
-    return cleaned, True
+    if filename and stored_size is not None:
+        try:
+            actual_size = (song_dir / filename).stat().st_size
+        except OSError:
+            pass
+        else:
+            if actual_size != stored_size:
+                current = {k: v for k, v in current.items() if k not in _FILE_DEPENDENT_KEYS}
+                invalidated = True
+
+    # Video staleness: clear probe data, preserve id
+    video = current.get("video")
+    if isinstance(video, dict):
+        vfilename = video.get("filename")
+        vstored_size = video.get("size_bytes")
+        if vfilename and vstored_size is not None:
+            try:
+                actual_vsize = (song_dir / vfilename).stat().st_size
+            except OSError:
+                pass
+            else:
+                if actual_vsize != vstored_size:
+                    kept_id = video.get("id")
+                    new_video: dict = {"id": kept_id} if kept_id else {}
+                    if new_video:
+                        current = {**current, "video": new_video}
+                    else:
+                        current = {k: v for k, v in current.items() if k != "video"}
+                    invalidated = True
+
+    return current, invalidated
 
 
 def update(song_dir: Path, data: dict) -> bool:
@@ -206,9 +246,131 @@ def probe_audio(path: Path) -> dict | None:
     return result
 
 
+def probe_video(path: Path) -> dict | None:
+    """Run ffprobe on a video file and return video stream properties, or None on failure.
+
+    Returned keys (present when ffprobe can report them):
+        duration_s, codec, width, height, fps, bit_rate_kbps,
+        pixel_format, color_space, major_brand
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries",
+                "stream=codec_name,codec_type,width,height,r_frame_rate,"
+                "bit_rate,pix_fmt,color_space",
+                "-show_entries", "format=duration,bit_rate",
+                "-show_entries", "format_tags=major_brand",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        raw = json.loads(proc.stdout)
+    except ValueError:
+        return None
+
+    fmt = raw.get("format", {})
+    fmt_tags = fmt.get("tags", {})
+    video_stream = next(
+        (s for s in raw.get("streams", []) if s.get("codec_type") == "video"),
+        {},
+    )
+
+    result: dict = {}
+
+    if codec := video_stream.get("codec_name"):
+        result["codec"] = str(codec)
+
+    for key in ("width", "height"):
+        val = video_stream.get(key)
+        if val is not None:
+            try:
+                result[key] = int(val)
+            except (ValueError, TypeError):
+                pass
+
+    fps_raw = video_stream.get("r_frame_rate")
+    if fps_raw and "/" in str(fps_raw):
+        try:
+            num, den = str(fps_raw).split("/", 1)
+            if int(den):
+                result["fps"] = round(int(num) / int(den), 3)
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    for dur_raw in (fmt.get("duration"), video_stream.get("duration")):
+        if dur_raw is not None:
+            try:
+                result["duration_s"] = round(float(dur_raw), 3)
+                break
+            except (ValueError, TypeError):
+                pass
+
+    for br_raw in (video_stream.get("bit_rate"), fmt.get("bit_rate")):
+        if br_raw and str(br_raw) not in ("N/A", "0", ""):
+            try:
+                result["bit_rate_kbps"] = round(int(br_raw) / 1000, 1)
+                break
+            except (ValueError, TypeError):
+                pass
+
+    pix_fmt = video_stream.get("pix_fmt")
+    if pix_fmt and str(pix_fmt) not in ("N/A", ""):
+        result["pixel_format"] = str(pix_fmt)
+
+    color_space = video_stream.get("color_space")
+    if color_space and str(color_space) not in ("N/A", "unknown", ""):
+        result["color_space"] = str(color_space)
+
+    brand = fmt_tags.get("major_brand")
+    if brand and str(brand) not in ("N/A", ""):
+        result["major_brand"] = str(brand)
+
+    return result or None
+
+
 def set_video_id(song_dir: Path, video_id: str) -> bool:
-    """Set the video_id field. Returns True if the file changed."""
-    return update(song_dir, {"video_id": video_id})
+    """Set video.id without probing the file. Returns True if the file changed."""
+    current = read(song_dir)
+    existing_video = current.get("video")
+    if isinstance(existing_video, dict):
+        updated_video: dict = {**existing_video, "id": video_id}
+    else:
+        updated_video = {"id": video_id}
+    return update(song_dir, {"video": updated_video})
+
+
+def set_video(song_dir: Path, video_path: Path, video_id: str | None = None) -> bool:
+    """Probe video_path and store video properties + file identity + optional id.
+
+    All properties go under the 'video' key. An existing video.id is preserved
+    when video_id is not supplied. Returns True if anything changed.
+    """
+    info = probe_video(video_path) or {}
+    data: dict = {"filename": video_path.name}
+    try:
+        data["size_bytes"] = video_path.stat().st_size
+    except OSError:
+        pass
+    data.update(info)
+
+    if video_id is not None:
+        data["id"] = video_id
+    else:
+        existing_video = read(song_dir).get("video")
+        if isinstance(existing_video, dict) and (eid := existing_video.get("id")):
+            data["id"] = eid
+
+    return update(song_dir, {"video": data})
 
 
 def set_replaygain(song_dir: Path, gain_db: float, peak: float | None) -> bool:
@@ -238,10 +400,13 @@ def set_audio(song_dir: Path, audio_path: Path) -> bool:
 
 
 def migrate(songs_dir: Path) -> int:
-    """Migrate fix-metadata.json files written before filename/size_bytes moved to root.
+    """Migrate fix-metadata.json files to the current schema.
 
-    Pulls filename and size_bytes out of the audio section (old location) and
-    writes them at the top level. Returns the count of files changed.
+    1. Pulls filename and size_bytes out of the audio section (old location)
+       and writes them at the top level.
+    2. Moves a root-level video_id into video.id.
+
+    Returns the count of files changed.
     """
     updated = 0
     for song_dir in sorted(
@@ -250,19 +415,32 @@ def migrate(songs_dir: Path) -> int:
         current = read(song_dir)
         if not current:
             continue
-        audio = current.get("audio", {})
-        moved: dict = {}
-        for key in ("filename", "size_bytes"):
-            if key in audio and key not in current:
-                moved[key] = audio.pop(key)
-        if not moved:
+        changed = False
+
+        # Migration 1: filename/size_bytes from audio section -> root
+        audio = current.get("audio")
+        if isinstance(audio, dict):
+            for key in ("filename", "size_bytes"):
+                if key in audio and key not in current:
+                    current[key] = audio.pop(key)
+                    changed = True
+            if not audio:
+                del current["audio"]
+
+        # Migration 2: root video_id -> video.id
+        if "video_id" in current:
+            root_vid = current.pop("video_id")
+            changed = True
+            existing_video = current.get("video")
+            if isinstance(existing_video, dict):
+                if "id" not in existing_video:
+                    current["video"] = {"id": root_vid, **existing_video}
+            else:
+                current["video"] = {"id": root_vid}
+
+        if not changed:
             continue
-        merged = {**moved, **current}
-        if audio:
-            merged["audio"] = audio
-        else:
-            merged.pop("audio", None)
-        _write(song_dir, merged)
+        _write(song_dir, current)
         updated += 1
     return updated
 
@@ -315,6 +493,90 @@ def _read_replaygain_tags(path: Path) -> tuple[float, float | None] | None:
         return None
     peak = _find("replaygain_track_peak")
     return gain, peak
+
+
+def _find_declared_video(song_dir: Path) -> Path | None:
+    """Return the video file named in any chart's #VIDEO tag, or None."""
+    for chart in sorted(song_dir.glob("*.txt")):
+        if chart.name.startswith("._"):
+            continue
+        try:
+            text = chart.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.lstrip().startswith("#"):
+                break
+            key, _, value = line.lstrip()[1:].partition(":")
+            if key.strip().upper() == "VIDEO":
+                named = value.strip()
+                if named:
+                    candidate = song_dir / named
+                    if candidate.is_file():
+                        return candidate
+                break
+    return None
+
+
+def _usdb_video_id(song_dir: Path) -> str | None:
+    """Read video_id from .usdb marker meta_tags (v= preferred, a= fallback)."""
+    for marker in sorted(song_dir.glob("*.usdb")):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        sources: dict[str, str] = {}
+        for token in str(payload.get("meta_tags", "")).split(","):
+            if "=" in token:
+                k, _, v = token.partition("=")
+                k, v = k.strip(), v.strip()
+                if k in ("v", "a") and v:
+                    sources[k] = v
+        result = sources.get("v") or sources.get("a")
+        if result:
+            return result
+    return None
+
+
+def record_basics(song_dir: Path, audio_path: Path | None = None) -> bool:
+    """Record filename/size, cached duration, and video_id from .usdb — no ffprobe.
+
+    audio_path: the primary audio file; pass None to discover it from the
+    chart's #MP3 tag. Returns True if fix-metadata.json changed.
+    """
+    from utils import audio_lengths as _al
+
+    changed = False
+
+    if audio_path is None:
+        audio_path = _al.find_full_mix(song_dir)
+
+    if audio_path is not None and audio_path.is_file():
+        try:
+            size = audio_path.stat().st_size
+        except OSError:
+            size = None
+        if size is not None:
+            data: dict = {"filename": audio_path.name, "size_bytes": size}
+            current = read(song_dir)
+            if "duration_s" not in current.get("audio", {}):
+                dur = _al.cached_duration(audio_path)
+                if dur is not None:
+                    data["audio"] = {**current.get("audio", {}), "duration_s": dur}
+            changed = update(song_dir, data) or changed
+
+    current = read(song_dir)
+    if not (isinstance(current.get("video"), dict) and current["video"].get("id")):
+        vid = _usdb_video_id(song_dir)
+        if vid:
+            existing_video = current.get("video")
+            if isinstance(existing_video, dict):
+                updated_video: dict = {**existing_video, "id": vid}
+            else:
+                updated_video = {"id": vid}
+            changed = update(song_dir, {"video": updated_video}) or changed
+
+    return changed
 
 
 def backfill_audio(songs_dir: Path, *, overwrite: bool = False) -> int:

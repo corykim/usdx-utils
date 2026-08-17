@@ -35,7 +35,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from utils import audio_lengths
+from utils import audio_lengths, fix_metadata
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -180,6 +180,7 @@ def main() -> int:
 
     added = corrected = 0
     unresolved: list[Path] = []
+    modified_dirs: set[Path] = set()
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         for chart in sorted(song_dir.glob("*.txt")):
@@ -211,6 +212,8 @@ def main() -> int:
                 continue
 
             set_mp3_tag(chart, value, write=args.write)
+            if args.write:
+                modified_dirs.add(song_dir)
             if current is None:
                 added += 1
                 verb = "added" if args.write else "would add"
@@ -219,6 +222,9 @@ def main() -> int:
                 corrected += 1
                 verb = "corrected" if args.write else "would correct"
                 print(f"{verb}: {chart.relative_to(songs_dir)} -> #MP3:{current} -> #MP3:{value}")
+
+    for sd in modified_dirs:
+        fix_metadata.record_basics(sd)
 
     mode = "write" if args.write else "dry-run"
     fixed = added + corrected

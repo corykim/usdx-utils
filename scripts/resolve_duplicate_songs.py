@@ -92,7 +92,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
-from utils import audio_lengths
+from utils import audio_lengths, fix_metadata
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -1070,6 +1070,13 @@ def main() -> int:
                     kept.rename(target)
                 acted = True
 
+        if args.write and acted:
+            for kept in keepers:
+                keeper_target = base_name_for(kept.name)
+                final = (songs_dir / keeper_target) if keeper_target else kept
+                final_dir = final if final.is_dir() else kept
+                if final_dir.is_dir():
+                    fix_metadata.record_basics(final_dir)
         flush(acted)
 
     mode = "write" if args.write else "dry-run"

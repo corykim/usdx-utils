@@ -84,7 +84,7 @@ from pathlib import Path
 
 import apply_replaygain
 import tag_split_audio
-from utils import audio_lengths, song_folders
+from utils import audio_lengths, fix_metadata, song_folders
 
 # Windows consoles are frequently stuck on a legacy codepage (e.g. cp1252)
 # that can't represent every character in these songs' filenames. Reconfigure
@@ -376,6 +376,53 @@ def list_models() -> int:
     return 0
 
 
+def _report_missing_stems(
+    songs_dir: Path, *, category: str, full_paths: bool, details: bool
+) -> int:
+    """List songs with missing stems to stdout, counts to stderr (like find_missing_stems.py)."""
+    none: list[str] = []
+    partial: list[str] = []
+    has_source: list[str] = []
+    no_source: list[str] = []
+
+    for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
+        if song_dir.name.startswith("."):
+            continue
+        label = str(song_dir) if full_paths else song_dir.name
+        stems = audio_lengths.stems_in(song_dir)
+        if len(stems) == 1:
+            if details:
+                label = f"{label}  --  has {stems[0].name}, missing the other"
+            partial.append(label)
+        elif not stems:
+            mix = audio_lengths.find_full_mix(song_dir)
+            if details:
+                label = f"{label}  --  {'full mix: ' + mix.name if mix else 'no audio to separate from'}"
+            none.append(label)
+            (has_source if mix else no_source).append(label)
+
+    listing = {
+        "none": none,
+        "partial": partial,
+        "all": none + partial,
+        "has-source": has_source,
+        "no-source": no_source,
+    }[category]
+    for entry in listing:
+        print(entry)
+
+    print(
+        f"\nno stems: {len(none)} | partial (one stem only): {len(partial)}",
+        file=sys.stderr,
+    )
+    print(
+        f"  of the {len(none)} with no stems: {len(has_source)} have a full "
+        f"mix to separate, {len(no_source)} have no audio to separate from",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
@@ -396,6 +443,27 @@ def main() -> int:
         "--model-dir", type=Path, default=DEFAULT_MODEL_DIR, help="where checkpoints are cached"
     )
     parser.add_argument("--list-models", action="store_true", help="list models with SDR scores and exit")
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="Print a bare listing of songs with missing stems to stdout and exit, "
+             "without loading the model or running any separation. "
+             "Matches the old find_missing_stems.py behavior.",
+    )
+    parser.add_argument(
+        "--category",
+        choices=("none", "partial", "all", "has-source", "no-source"),
+        default="none",
+        help="Which list to print with --report-only (default: none -- no stems at all). "
+             "has-source and no-source are the full-mix breakdown of none.",
+    )
+    parser.add_argument(
+        "--full-paths", action="store_true",
+        help="Print full paths instead of just folder names (--report-only mode).",
+    )
+    parser.add_argument(
+        "--details", action="store_true",
+        help="Append which stem is present / whether a full mix exists (--report-only mode).",
+    )
     parser.add_argument(
         "--tolerance",
         type=float,
@@ -437,6 +505,18 @@ def main() -> int:
 
     if args.list_models:
         return list_models()
+
+    if args.report_only:
+        songs_dir = args.songs_dir
+        if not songs_dir.is_dir():
+            print(f"songs directory not found: {songs_dir}", file=sys.stderr)
+            return 2
+        return _report_missing_stems(
+            songs_dir,
+            category=args.category,
+            full_paths=args.full_paths,
+            details=args.details,
+        )
 
     if args.dir is not None:
         try:
@@ -577,6 +657,7 @@ def main() -> int:
                 replaygain_note = f"replaygain failed: {exc}"
         else:
             replaygain_note = None
+        fix_metadata.record_basics(song_dir, mix)
         done += 1
         took = time.monotonic() - started
         elapsed_total += took

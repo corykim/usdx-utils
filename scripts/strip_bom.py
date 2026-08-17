@@ -24,6 +24,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from utils import fix_metadata
+
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -55,6 +57,7 @@ def main() -> int:
 
     at_start = 0
     mid_file = 0
+    modified_dirs: set[Path] = set()
 
     for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
         if song_dir.name.startswith("."):
@@ -74,6 +77,10 @@ def main() -> int:
             print(f"{verb} ({where}): {song_dir.name}/{chart.name}")
             if args.write:
                 chart.write_bytes(raw.replace(BOM, b""))
+                modified_dirs.add(song_dir)
+
+    for sd in modified_dirs:
+        fix_metadata.record_basics(sd)
 
     mode = "write" if args.write else "dry-run"
     total = at_start + mid_file

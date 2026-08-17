@@ -61,6 +61,7 @@ this refuses without --force rather than adding a second source.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -73,8 +74,143 @@ from fix_missing_mp3 import (  # noqa: E402
     read_text_preserving_encoding,
     set_mp3_tag,
 )
-from find_missing_video import charts_in  # noqa: E402
-from utils import audio_lengths, song_folders, youtube  # noqa: E402
+from utils import audio_lengths, fix_metadata, song_folders, youtube  # noqa: E402
+
+AUDIO_EXTENSIONS = frozenset({".mp3", ".ogg", ".m4a", ".wav", ".flac", ".opus"})
+VIDEO_EXTENSIONS_AUDIO = frozenset({".mp4", ".webm", ".mkv", ".avi", ".mov", ".mpg", ".mpeg"})
+STEM_FILENAMES = frozenset({"vocals.ogg", "instrumental.ogg", "accompaniment.ogg"})
+
+
+def charts_in(directory: Path) -> list[Path]:
+    return [p for p in sorted(directory.glob("*.txt")) if not p.name.startswith("._")]
+
+
+def mp3_tag_value(chart: Path) -> str | None:
+    for line in read_text_preserving_encoding(chart)[0].splitlines():
+        if not line.lstrip().startswith("#"):
+            break
+        key, _, value = line.lstrip()[1:].partition(":")
+        if key.strip().upper() == "MP3":
+            return value.strip() or None
+    return None
+
+
+def _usdb_markers(directory: Path) -> list[Path]:
+    return sorted(directory.glob("*.usdb"))
+
+
+def audio_id_from_marker(song_dir: Path) -> str | None:
+    """Read the best audio source id from .usdb marker (a= preferred, v= fallback) or fix-metadata.json."""
+    for marker in sorted(song_dir.glob("*.usdb")):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        sources: dict[str, str] = {}
+        for token in str(payload.get("meta_tags", "")).split(","):
+            if "=" in token:
+                key, _, value = token.partition("=")
+                key, value = key.strip(), value.strip()
+                if key in ("a", "v") and value:
+                    sources[key] = value
+        result = sources.get("a") or sources.get("v")
+        if result:
+            return result
+    video_section = fix_metadata.read(song_dir).get("video")
+    if isinstance(video_section, dict):
+        vid = str(video_section.get("id", "")).strip()
+        if vid:
+            return vid
+    return None
+
+
+def _describe_audio_failure(directory: Path) -> str:
+    bits: list[str] = []
+    for marker in _usdb_markers(directory):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            bits.append(f"{marker.stem}: unreadable marker")
+            continue
+        statuses = ", ".join(
+            f"{part}={payload[part].get('status', '?')}"
+            for part in ("audio", "video")
+            if isinstance(payload.get(part), dict)
+        )
+        sources = {
+            key: value
+            for token in str(payload.get("meta_tags", "")).split(",")
+            if "=" in token
+            for key, value in [token.split("=", 1)]
+            if key in ("a", "v")
+        }
+        source = " ".join(f"{k}={v}" for k, v in sorted(sources.items()))
+        bits.append(
+            f"usdb#{payload.get('song_id', '?')} {statuses}" + (f" [{source}]" if source else "")
+        )
+    return "; ".join(bits) if bits else "no .usdb marker"
+
+
+def _report_missing_audio(
+    songs_dir: Path,
+    *,
+    category: str,
+    usdb_only: bool,
+    full_paths: bool,
+    details: bool,
+) -> int:
+    """List songs with no audio to stdout, counts to stderr (like find_missing_audio.py)."""
+    no_audio: list[str] = []
+    broken: list[str] = []
+    untagged: list[str] = []
+    skipped_unmanaged = 0
+
+    for song_dir in sorted(p for p in songs_dir.iterdir() if p.is_dir()):
+        if song_dir.name.startswith("."):
+            continue
+        if usdb_only and not _usdb_markers(song_dir):
+            skipped_unmanaged += 1
+            continue
+
+        files = [p for p in song_dir.iterdir() if p.is_file()]
+        audio = [p for p in files if p.suffix.lower() in AUDIO_EXTENSIONS]
+        videos = [p for p in files if p.suffix.lower() in VIDEO_EXTENSIONS_AUDIO]
+        label = str(song_dir) if full_paths else song_dir.name
+        if details:
+            label = f"{label}  --  {_describe_audio_failure(song_dir)}"
+
+        if not audio and not videos:
+            no_audio.append(label)
+            continue
+
+        for chart in charts_in(song_dir):
+            declared = mp3_tag_value(chart)
+            chart_label = str(chart) if full_paths else f"{song_dir.name}/{chart.name}"
+            if declared is None:
+                untagged.append(chart_label)
+            elif not (song_dir / declared).is_file():
+                broken.append(f"{chart_label}  ->  #MP3:{declared}")
+
+    listing = {
+        "none": no_audio,
+        "broken": broken,
+        "untagged": untagged,
+        "all": no_audio + broken + untagged,
+    }[category]
+    for entry in listing:
+        print(entry)
+
+    print(
+        f"\nno audio and no video: {len(no_audio)}"
+        f" | #MP3 names a missing file: {len(broken)}"
+        f" | audio present but untagged: {len(untagged)}",
+        file=sys.stderr,
+    )
+    if usdb_only and skipped_unmanaged:
+        print(f"skipped {skipped_unmanaged} folder(s) with no .usdb marker", file=sys.stderr)
+    if no_audio and not details:
+        print("Re-run with --details to see what the syncer recorded.", file=sys.stderr)
+    return 0
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -407,16 +543,43 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("song", help=song_folders.HELP)
     parser.add_argument(
-        "source",
+        "song", nargs="?", default=None,
+        help=f"{song_folders.HELP}. Omit when using --report-only.",
+    )
+    parser.add_argument(
+        "source", nargs="?", default=None,
         help="a YouTube URL or bare 11-char video id, or a path to a local video "
-             "or audio file to pull the track out of",
+             "or audio file to pull the track out of. Omit to read from the .usdb "
+             "marker or fix-metadata.json (a= preferred over v=).",
     )
     parser.add_argument(
         "--songs-dir", type=Path,
         default=Path(__file__).resolve().parent.parent / "songs",
         help="Directory containing one song folder per subdirectory (default: ../songs)",
+    )
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="Print a bare listing of songs with no audio to stdout and exit, without "
+             "downloading anything. Matches the old find_missing_audio.py behavior.",
+    )
+    parser.add_argument(
+        "--category",
+        choices=("none", "broken", "untagged", "all"),
+        default="none",
+        help="Which list to print with --report-only (default: none -- no audio and no video).",
+    )
+    parser.add_argument(
+        "--usdb-only", action="store_true",
+        help="Only consider folders that have a .usdb marker (--report-only mode).",
+    )
+    parser.add_argument(
+        "--full-paths", action="store_true",
+        help="Print full paths instead of just folder names (--report-only mode).",
+    )
+    parser.add_argument(
+        "--details", action="store_true",
+        help="Append what the .usdb marker recorded about audio status (--report-only mode).",
     )
     parser.add_argument(
         "--audio-format", default=DEFAULT_AUDIO_FORMAT,
@@ -444,28 +607,59 @@ def main() -> int:
         print(f"error: {args.songs_dir} is not a directory", file=sys.stderr)
         return 1
 
+    if args.report_only:
+        return _report_missing_audio(
+            args.songs_dir,
+            category=args.category,
+            usdb_only=args.usdb_only,
+            full_paths=args.full_paths,
+            details=args.details,
+        )
+
+    if args.song is None:
+        print("error: song is required unless --report-only is given", file=sys.stderr)
+        return 1
+
     try:
         song_dir = song_folders.resolve(args.song, args.songs_dir)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    # Resolve source: explicit arg > marker lookup.
     # An existing file wins over a YouTube reading, the same precedence
     # song_folders.resolve uses: what is on disk is unambiguous.
-    local_source = Path(song_folders.clean_argument(args.source))
-    video_id = None
-    if local_source.is_file():
-        if audio_lengths.has_audio_stream(local_source) is False:
-            print(f"error: {local_source.name} has no audio track to extract",
-                  file=sys.stderr)
-            return 1
+    local_source: Path | None = None
+    video_id: str | None = None
+    if args.source is not None:
+        candidate = Path(song_folders.clean_argument(args.source))
+        if candidate.is_file():
+            if audio_lengths.has_audio_stream(candidate) is False:
+                print(f"error: {candidate.name} has no audio track to extract",
+                      file=sys.stderr)
+                return 1
+            local_source = candidate
+        else:
+            try:
+                video_id = youtube.parse_video_id(args.source)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
     else:
-        local_source = None
-        try:
-            video_id = youtube.parse_video_id(args.source)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+        raw = audio_id_from_marker(song_dir)
+        if raw is None:
+            print(
+                "error: source is required (no audio or video id found in "
+                ".usdb marker or fix-metadata.json)",
+                file=sys.stderr,
+            )
             return 1
+        try:
+            video_id = youtube.parse_video_id(raw)
+        except ValueError as exc:
+            print(f"error: marker id {raw!r} is not a valid YouTube id: {exc}", file=sys.stderr)
+            return 1
+        print(f"source: using id {video_id} from marker", file=sys.stderr)
 
     existing = audio_lengths.find_full_mix(song_dir)
     if existing is not None and not args.force:
@@ -582,6 +776,10 @@ def main() -> int:
     for chart in untagged:
         set_mp3_tag(chart, audio_path.name, write=True)
         print(f"tagged: {chart.name} -> #MP3:{audio_path.name}")
+
+    if video_id is not None:
+        fix_metadata.set_video_id(song_dir, video_id)  # audio id only; no file to probe
+    fix_metadata.record_basics(song_dir, audio_path)
 
     print("\nThe chart is timed against this audio -- check #GAP still lines up "
           "before trusting it; a different source usually starts at a different offset.")

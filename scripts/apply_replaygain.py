@@ -556,6 +556,7 @@ def process(song_dir: Path, *, force: bool, terse: bool, write: bool) -> str:
         if gain_db is not None:
             peak = read_peak(mix) if mix is not None else None
             fix_metadata.set_replaygain(song_dir, gain_db, peak)
+        fix_metadata.record_basics(song_dir, mix)
 
     # The folder name is printed by the caller before any of this runs, so a
     # song that takes a while to measure is named while it is being measured

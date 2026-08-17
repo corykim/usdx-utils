@@ -35,7 +35,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from utils import audio_lengths
+from utils import audio_lengths, fix_metadata
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -211,6 +211,8 @@ def main() -> int:
             for tag_line in removed:
                 print(f"  {'stripped' if args.write else 'would strip'}: {chart.name} -> {tag_line}")
         pruned += 1
+        if args.write:
+            fix_metadata.record_basics(song_dir, full_mix)
 
     mode = "write" if args.write else "dry-run"
     print(

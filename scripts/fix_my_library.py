@@ -8,6 +8,7 @@ individual scripts interact.
 
     uv run scripts/fix_my_library.py            # preview everything
     uv run scripts/fix_my_library.py --write    # apply everything
+    uv run scripts/fix_my_library.py --full --write  # also split stems + ReplayGain
 
 The sequence:
 
@@ -34,8 +35,31 @@ The sequence:
                           under a non-standard name. Idempotent, so this is
                           usually a no-op.
   6. fix_missing_mp3      Backfills #MP3, which needs the final audio layout.
-  7. find_missing_video   Declares #VIDEO for videos already sitting in a
-                          folder untagged.
+  7. fix_missing_video    Without --full: reports songs still missing a video.
+                          With --full: declares #VIDEO for videos already in
+                          the folder untagged, then downloads for songs that
+                          have a known id in their .usdb marker or
+                          fix-metadata.json but no video file on disk yet.
+
+With --full, three more steps run after the above:
+
+  8. split_audio_stems    Separates stems for every song that has a full mix
+                          but no vocals.ogg/instrumental.ogg yet. Requires a
+                          GPU; on CPU the step will stop and say so. Each new
+                          stem pair is tagged with the mix's ReplayGain value
+                          as it is created.
+  9. apply_replaygain     Writes a ReplayGain tag on every song and propagates
+                          the same value to its stems. Covers the full mixes
+                          and any stems that pre-dated step 9.
+ 10. backfill_metadata    Populates fix-metadata.json for every song: filename,
+                          size, cached duration, video_id from .usdb, and (with
+                          --full/--ffprobe) the full audio probe via ffprobe.
+
+--backfill-metadata runs only step 10 as an extra step after the base seven.
+--ffprobe adds the ffprobe audio probe to the backfill step; implied by --full.
+
+--full is omitted by default because stem separation can take hours of GPU
+time -- not something to start as a side effect of a routine tidy-up.
 
 --terse is handed on to the steps that understand it, so they report only
 what they actually changed.
@@ -44,7 +68,7 @@ Then it reports what still needs a human: songs whose audio never downloaded,
 songs with no video at all, and songs not yet cross-referenced against USDB
 (regenerating usdb-missing.txt when --write is given).
 
-**Step 5 deletes files, and songs/ is gitignored, so git will not bring them
+**Step 2 deletes files, and songs/ is gitignored, so git will not bring them
 back.** It was left out of this run for exactly that reason until
 split_audio_stems.py existed; now a wrongly pruned stem can be regenerated
 from the song's own mix, which is what makes automating the deletion
@@ -82,10 +106,14 @@ class Step:
     # Deletes files rather than editing charts. Worth saying out loud in the
     # step header, since songs/ is gitignored and nothing here is undoable.
     destructive: bool = False
+    # Scripts with non-empty PEP 723 dependency headers must be launched via
+    # "uv run --script" so uv resolves and installs their packages; plain
+    # sys.executable bypasses that and lands on an ImportError.
+    uv_script: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
-STEPS = [
+BASE_STEPS = [
     Step("strip_bom.py", "Remove UTF-8 BOMs from charts"),
     Step(
         "prune_desynced_stems.py",
@@ -109,18 +137,56 @@ STEPS = [
         accepts_terse=True,
     ),
     Step("fix_missing_mp3.py", "Backfill missing #MP3 tags", accepts_terse=True),
+]
+
+# Two variants of the video step — picked by --full.
+_VIDEO_STEP = Step(
+    "fix_missing_video.py",
+    "Report songs still missing a video",
+    extra_args=["--report-only"],
+    accepts_terse=True,
+)
+_VIDEO_STEP_FULL = Step(
+    "fix_missing_video.py",
+    "Declare #VIDEO for untagged videos; download for songs with a known id",
+    extra_args=["--download"],
+    accepts_terse=True,
+)
+
+# Steps added only under --full, after the video step.
+FULL_ONLY_STEPS = [
     Step(
-        "find_missing_video.py",
-        "Declare #VIDEO for untagged videos",
-        positional_songs_dir=True,
-        discard_stdout=True,
+        "split_audio_stems.py",
+        "Separate stems for songs that have a full mix but no stems yet",
         accepts_terse=True,
+        uv_script=True,
+    ),
+    Step(
+        "apply_replaygain.py",
+        "Write ReplayGain tags across the library",
+        accepts_terse=True,
+        uv_script=True,
     ),
 ]
 
+_BACKFILL_STEP = Step(
+    "backfill_metadata.py",
+    "Backfill fix-metadata.json from filesystem, audio cache, and .usdb markers",
+    accepts_terse=True,
+)
+_BACKFILL_STEP_FFPROBE = Step(
+    "backfill_metadata.py",
+    "Backfill fix-metadata.json (including full audio probe via ffprobe)",
+    extra_args=["--ffprobe"],
+    accepts_terse=True,
+)
+
 
 def run_step(step: Step, songs_dir: Path | None, *, terse: bool, write: bool) -> int:
-    argv = [sys.executable, str(SCRIPTS_DIR / step.script)]
+    if step.uv_script:
+        argv = ["uv", "run", "--script", str(SCRIPTS_DIR / step.script)]
+    else:
+        argv = [sys.executable, str(SCRIPTS_DIR / step.script)]
     if songs_dir is not None:
         argv += [str(songs_dir)] if step.positional_songs_dir else ["--songs-dir", str(songs_dir)]
     argv += step.extra_args
@@ -155,17 +221,52 @@ def main() -> int:
         "only what they actually changed.",
     )
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Also download missing videos, run split_audio_stems, apply_replaygain, "
+             "and backfill metadata with ffprobe. Omitted by default because stem "
+             "separation can take hours of GPU time.",
+    )
+    parser.add_argument(
+        "--backfill-metadata",
+        action="store_true",
+        help="Add a final step that backfills fix-metadata.json for every song. "
+             "Implied by --full.",
+    )
+    parser.add_argument(
+        "--ffprobe",
+        action="store_true",
+        help="When --backfill-metadata is active, also run ffprobe for the full audio "
+             "section. Implied by --full.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Apply changes. Without this flag every step runs as a dry run.",
     )
     args = parser.parse_args()
 
-    mode = "WRITE" if args.write else "DRY RUN"
-    print(f"===== fix_my_library ({mode}) =====")
+    backfill = args.backfill_metadata or args.full
+    ffprobe = args.ffprobe or args.full
 
-    for number, step in enumerate(STEPS, start=1):
-        print(f"\n----- step {number}/{len(STEPS)}: {step.script} -- {step.summary} -----")
+    video_step = _VIDEO_STEP_FULL if args.full else _VIDEO_STEP
+    backfill_step = _BACKFILL_STEP_FFPROBE if ffprobe else _BACKFILL_STEP
+    steps = BASE_STEPS + [video_step] + (FULL_ONLY_STEPS if args.full else [])
+    if backfill:
+        steps = steps + [backfill_step]
+
+    mode = "WRITE" if args.write else "DRY RUN"
+    qualifiers = []
+    if args.full:
+        qualifiers.append("full")
+    elif args.backfill_metadata:
+        qualifiers.append("backfill-metadata")
+        if ffprobe:
+            qualifiers.append("ffprobe")
+    print(f"===== fix_my_library ({mode}{', ' + ', '.join(qualifiers) if qualifiers else ''}) =====")
+
+    for number, step in enumerate(steps, start=1):
+        print(f"\n----- step {number}/{len(steps)}: {step.script} -- {step.summary} -----")
         if step.destructive and args.write:
             print("      (deletes files; songs/ is gitignored, so this is permanent)")
         code = run_step(step, args.songs_dir, terse=args.terse, write=args.write)
@@ -177,20 +278,35 @@ def main() -> int:
             )
             return code
 
-    def run_report(script: str, heading: str, **kwargs: object) -> int:
+    def run_report(
+        script: str,
+        heading: str,
+        *,
+        extra_args: list[str] = (),
+        songs_dir_as_flag: bool = False,
+        **kwargs: object,
+    ) -> int:
         """Run a reporting script, returning its exit code."""
         print(f"\n----- report: {heading} -----")
         sys.stdout.flush()
         argv = [sys.executable, str(SCRIPTS_DIR / script)]
         if args.songs_dir is not None:
-            argv.append(str(args.songs_dir))
+            if songs_dir_as_flag:
+                argv += ["--songs-dir", str(args.songs_dir)]
+            else:
+                argv.append(str(args.songs_dir))
+        argv += list(extra_args)
         return subprocess.run(argv, **kwargs).returncode  # type: ignore[arg-type]
 
     for script, heading in (
-        ("find_missing_audio.py", "songs with no audio at all"),
-        ("find_missing_video.py", "songs still missing a video"),
+        ("extract_audio_from_youtube.py", "songs with no audio at all"),
+        ("fix_missing_video.py", "songs still missing a video"),
     ):
-        code = run_report(script, heading, stdout=subprocess.DEVNULL)
+        code = run_report(
+            script, heading,
+            extra_args=["--report-only"], songs_dir_as_flag=True,
+            stdout=subprocess.DEVNULL,
+        )
         if code != 0:
             print(f"\n{script} exited {code}; stopping.", file=sys.stderr)
             return code

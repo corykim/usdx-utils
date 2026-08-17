@@ -161,6 +161,18 @@ def audio_duration(path: Path) -> float | None:
     return result
 
 
+def cached_duration(path: Path) -> float | None:
+    """Return the cached duration for path without running ffprobe.
+
+    Returns None when the file has not been measured yet, or when its current
+    size differs from what was measured (implying a replacement).
+    """
+    key = _cache_key(path)
+    if key is None:
+        return None
+    return _load().get(key)
+
+
 def declared_audio(directory: Path) -> Path | None:
     """The audio file the folder's charts name in #MP3, if it is there.
 

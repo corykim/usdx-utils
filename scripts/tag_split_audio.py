@@ -32,7 +32,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from utils import audio_lengths
+from utils import audio_lengths, fix_metadata
 
 # Windows consoles are frequently stuck on a legacy codepage (e.g. cp1252)
 # that can't represent every character in these songs' filenames. Reconfigure
@@ -321,6 +321,8 @@ def main() -> int:
         checked_charts += checked
         changed_charts += changed
         desynced_folders += desynced
+        if args.write and changed:
+            fix_metadata.record_basics(song_dir)
 
     mode = "write" if args.write else "dry-run"
     print(
