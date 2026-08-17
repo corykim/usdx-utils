@@ -1,0 +1,76 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="absl-py" />
+          <option value="audio-separator" />
+          <option value="audioop-lts" />
+          <option value="audioread" />
+          <option value="beartype" />
+          <option value="certifi" />
+          <option value="cffi" />
+          <option value="charset-normalizer" />
+          <option value="colorama" />
+          <option value="colorlog" />
+          <option value="cython" />
+          <option value="decorator" />
+          <option value="diffq-fixed" />
+          <option value="einops" />
+          <option value="ffmpeg-normalize" />
+          <option value="ffmpeg-progress-yield" />
+          <option value="filelock" />
+          <option value="flatbuffers" />
+          <option value="fsspec" />
+          <option value="idna" />
+          <option value="jinja2" />
+          <option value="joblib" />
+          <option value="julius" />
+          <option value="lazy-loader" />
+          <option value="librosa" />
+          <option value="llvmlite" />
+          <option value="markupsafe" />
+          <option value="ml-collections" />
+          <option value="ml-dtypes" />
+          <option value="mpmath" />
+          <option value="msgpack" />
+          <option value="mutagen" />
+          <option value="narwhals" />
+          <option value="networkx" />
+          <option value="numba" />
+          <option value="numpy" />
+          <option value="onnx-weekly" />
+          <option value="onnx2torch-py313" />
+          <option value="onnxruntime-gpu" />
+          <option value="packaging" />
+          <option value="pillow" />
+          <option value="platformdirs" />
+          <option value="pooch" />
+          <option value="protobuf" />
+          <option value="pycparser" />
+          <option value="pydub" />
+          <option value="pyyaml" />
+          <option value="requests" />
+          <option value="resampy" />
+          <option value="rotary-embedding-torch" />
+          <option value="samplerate" />
+          <option value="scikit-learn" />
+          <option value="scipy" />
+          <option value="setuptools" />
+          <option value="six" />
+          <option value="soundfile" />
+          <option value="soxr" />
+          <option value="standard-aifc" />
+          <option value="standard-chunk" />
+          <option value="standard-sunau" />
+          <option value="sympy" />
+          <option value="threadpoolctl" />
+          <option value="tqdm" />
+          <option value="typing-extensions" />
+          <option value="urllib3" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
