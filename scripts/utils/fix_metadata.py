@@ -11,21 +11,30 @@ another.
 Typical structure:
 
     {
+      "filename": "Song Name.ogg",
+      "size_bytes": 12345678,
       "video_id": "SXKlJuO07eM",
       "replaygain": {
         "track_gain_db": -9.90,
         "track_peak": 0.997600
       },
       "audio": {
-        "filename": "Song Name.ogg",
         "duration_s": 234.567,
         "codec": "vorbis",
         "sample_rate_hz": 44100,
+        "sample_rate_khz": 44.1,
         "channels": 2,
-        "bit_rate_kbps": 192.0,
-        "size_bytes": 12345678
+        "sample_format": "fltp",
+        "bit_rate_kbps": 192.0
       }
     }
+
+filename and size_bytes sit at the root because they are attributes of the
+file itself, not of its audio content. size_bytes is used by the staleness
+check: on every write, the recorded size is compared against the real file;
+if they differ, all file-derived sections (filename, size_bytes, audio,
+replaygain) are cleared so stale data cannot persist after a file is
+replaced.
 
 To pre-populate the audio section for existing songs, call backfill_audio():
 
@@ -60,22 +69,22 @@ def _write(song_dir: Path, data: dict) -> None:
     staged.replace(path)
 
 
-# Sections whose values were derived from the audio file and must be dropped
-# when that file is replaced or re-encoded.
-_FILE_DEPENDENT_SECTIONS = frozenset({"audio", "replaygain"})
+# Keys cleared when the audio file is found to have changed. filename and
+# size_bytes are included so a stale check doesn't keep re-firing on every
+# subsequent write until set_audio() is called to refresh them.
+_FILE_DEPENDENT_KEYS = frozenset({"filename", "size_bytes", "audio", "replaygain"})
 
 
 def _drop_stale_sections(song_dir: Path, current: dict) -> tuple[dict, bool]:
-    """If the recorded audio file size no longer matches, drop file-dependent sections.
+    """If the recorded audio file size no longer matches, drop file-dependent keys.
 
     Returns (possibly-cleaned dict, True if anything was dropped).
-    The size check uses audio.filename and audio.size_bytes, which probe_audio
-    writes on every successful probe. If either is absent the metadata is left
-    alone -- we can't verify what we don't have recorded.
+    filename and size_bytes live at the root and are set from the filesystem
+    by set_audio(), not derived from ffprobe. If either is absent the check
+    is skipped -- we can't verify what we haven't recorded yet.
     """
-    audio = current.get("audio", {})
-    filename = audio.get("filename")
-    stored_size = audio.get("size_bytes")
+    filename = current.get("filename")
+    stored_size = current.get("size_bytes")
     if not filename or stored_size is None:
         return current, False
     try:
@@ -84,7 +93,7 @@ def _drop_stale_sections(song_dir: Path, current: dict) -> tuple[dict, bool]:
         return current, False  # file gone or unreadable; don't invalidate blindly
     if actual_size == stored_size:
         return current, False
-    cleaned = {k: v for k, v in current.items() if k not in _FILE_DEPENDENT_SECTIONS}
+    cleaned = {k: v for k, v in current.items() if k not in _FILE_DEPENDENT_KEYS}
     return cleaned, True
 
 
@@ -110,16 +119,19 @@ def update(song_dir: Path, data: dict) -> bool:
 
 
 def probe_audio(path: Path) -> dict | None:
-    """Run ffprobe on path and return a dict of relevant fields, or None on failure.
+    """Run ffprobe on path and return audio properties, or None on failure.
 
-    Returned keys (all present if ffprobe can report them):
-        filename, duration_s, codec, sample_rate_hz, sample_rate_khz,
-        channels, bits_per_sample, sample_format, bit_rate_kbps, size_bytes
+    Returns only content derived from decoding the stream -- not filename or
+    size, which are filesystem attributes and are stored at the root by
+    set_audio() without needing ffprobe.
 
-    bits_per_sample is only present for lossless formats (WAV, FLAC, etc.);
-    lossy codecs (Vorbis, MP3, AAC) don't have a raw bit depth.
-    sample_format is the internal decoded format, e.g. "fltp" (32-bit float
-    planar, used by Vorbis/AAC), "s16" (signed 16-bit PCM), "s32".
+    Returned keys (present when ffprobe can report them):
+        duration_s, codec, sample_rate_hz, sample_rate_khz,
+        channels, bits_per_sample, sample_format, bit_rate_kbps
+
+    bits_per_sample is only present for lossless formats (WAV, FLAC, etc.).
+    sample_format is the internal decoded format: "fltp" (32-bit float planar,
+    used by Vorbis/AAC), "s16" (signed 16-bit PCM), "s32", etc.
     """
     try:
         proc = subprocess.run(
@@ -128,7 +140,7 @@ def probe_audio(path: Path) -> dict | None:
                 "-show_entries",
                 "stream=codec_name,codec_type,sample_rate,channels,"
                 "bit_rate,bits_per_raw_sample,sample_fmt",
-                "-show_entries", "format=duration,size,bit_rate",
+                "-show_entries", "format=duration,bit_rate",
                 "-of", "json",
                 str(path),
             ],
@@ -151,14 +163,13 @@ def probe_audio(path: Path) -> dict | None:
         {},
     )
 
-    result: dict = {"filename": path.name}
+    result: dict = {}
 
     for raw_val, out_key, coerce in [
         (fmt.get("duration"),            "duration_s",     lambda v: round(float(v), 3)),
         (audio_stream.get("codec_name"), "codec",          str),
         (audio_stream.get("sample_rate"),"sample_rate_hz", int),
         (audio_stream.get("channels"),   "channels",       int),
-        (fmt.get("size"),                "size_bytes",     int),
     ]:
         if raw_val is not None:
             try:
@@ -209,14 +220,51 @@ def set_replaygain(song_dir: Path, gain_db: float, peak: float | None) -> bool:
 
 
 def set_audio(song_dir: Path, audio_path: Path) -> bool:
-    """Probe audio_path with ffprobe and store the result under 'audio'.
+    """Probe audio_path and store audio properties + file identity.
 
-    Returns True if the stored data changed.
+    filename and size_bytes are read from the filesystem and stored at the
+    root (they describe the file, not its audio content). The ffprobe-derived
+    properties go under the 'audio' key. Returns True if anything changed.
     """
     info = probe_audio(audio_path)
     if info is None:
         return False
-    return update(song_dir, {"audio": info})
+    data: dict = {"audio": info, "filename": audio_path.name}
+    try:
+        data["size_bytes"] = audio_path.stat().st_size
+    except OSError:
+        pass
+    return update(song_dir, data)
+
+
+def migrate(songs_dir: Path) -> int:
+    """Migrate fix-metadata.json files written before filename/size_bytes moved to root.
+
+    Pulls filename and size_bytes out of the audio section (old location) and
+    writes them at the top level. Returns the count of files changed.
+    """
+    updated = 0
+    for song_dir in sorted(
+        p for p in songs_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+    ):
+        current = read(song_dir)
+        if not current:
+            continue
+        audio = current.get("audio", {})
+        moved: dict = {}
+        for key in ("filename", "size_bytes"):
+            if key in audio and key not in current:
+                moved[key] = audio.pop(key)
+        if not moved:
+            continue
+        merged = {**moved, **current}
+        if audio:
+            merged["audio"] = audio
+        else:
+            merged.pop("audio", None)
+        _write(song_dir, merged)
+        updated += 1
+    return updated
 
 
 def _read_replaygain_tags(path: Path) -> tuple[float, float | None] | None:
