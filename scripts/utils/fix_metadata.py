@@ -60,6 +60,34 @@ def _write(song_dir: Path, data: dict) -> None:
     staged.replace(path)
 
 
+# Sections whose values were derived from the audio file and must be dropped
+# when that file is replaced or re-encoded.
+_FILE_DEPENDENT_SECTIONS = frozenset({"audio", "replaygain"})
+
+
+def _drop_stale_sections(song_dir: Path, current: dict) -> tuple[dict, bool]:
+    """If the recorded audio file size no longer matches, drop file-dependent sections.
+
+    Returns (possibly-cleaned dict, True if anything was dropped).
+    The size check uses audio.filename and audio.size_bytes, which probe_audio
+    writes on every successful probe. If either is absent the metadata is left
+    alone -- we can't verify what we don't have recorded.
+    """
+    audio = current.get("audio", {})
+    filename = audio.get("filename")
+    stored_size = audio.get("size_bytes")
+    if not filename or stored_size is None:
+        return current, False
+    try:
+        actual_size = (song_dir / filename).stat().st_size
+    except OSError:
+        return current, False  # file gone or unreadable; don't invalidate blindly
+    if actual_size == stored_size:
+        return current, False
+    cleaned = {k: v for k, v in current.items() if k not in _FILE_DEPENDENT_SECTIONS}
+    return cleaned, True
+
+
 def update(song_dir: Path, data: dict) -> bool:
     """Shallow-merge data into fix-metadata.json. Returns True if anything changed.
 
@@ -67,10 +95,15 @@ def update(song_dir: Path, data: dict) -> bool:
     the file, so callers write whole sections at once:
         update(song_dir, {"replaygain": {"track_gain_db": -9.9, "track_peak": 0.998}})
     Other existing sections are preserved unchanged.
+
+    Before merging, the stored audio file size is compared against the real
+    file. If they differ, file-dependent sections (audio, replaygain) are
+    cleared first so stale data from a replaced file cannot persist.
     """
     current = read(song_dir)
+    current, invalidated = _drop_stale_sections(song_dir, current)
     merged = {**current, **data}
-    if merged == current:
+    if not invalidated and merged == current:
         return False
     _write(song_dir, merged)
     return True
@@ -186,11 +219,66 @@ def set_audio(song_dir: Path, audio_path: Path) -> bool:
     return update(song_dir, {"audio": info})
 
 
-def backfill_audio(songs_dir: Path, *, overwrite: bool = False) -> int:
-    """Probe each song's primary audio and write an 'audio' section.
+def _read_replaygain_tags(path: Path) -> tuple[float, float | None] | None:
+    """Read ReplayGain track gain and peak from audio tags, or None if absent.
 
-    Skips songs that already have an 'audio' section unless overwrite=True.
-    Returns the count of songs whose fix-metadata.json was updated.
+    Handles the three container spellings:
+      Vorbis comment   replaygain_track_gain / replaygain_track_peak
+      ID3 TXXX frame   TXXX:REPLAYGAIN_TRACK_GAIN / …_PEAK
+      MP4 freeform     ----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN / …_PEAK
+
+    The matching rule (last colon-separated segment, case-insensitive) covers
+    all three without special-casing each container.
+    """
+    try:
+        import mutagen
+        tags = mutagen.File(path)
+    except Exception:
+        return None
+    if tags is None:
+        return None
+    try:
+        items = dict(tags)
+    except Exception:
+        return None
+
+    def _find(suffix: str) -> float | None:
+        for key, value in items.items():
+            if str(key).lower().rsplit(":", 1)[-1] != suffix:
+                continue
+            raw = value
+            if isinstance(raw, list):
+                raw = raw[0] if raw else None
+            if raw is None:
+                continue
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            text = getattr(raw, "text", None)
+            if text is not None:
+                raw = text[0] if isinstance(text, list) and text else str(text)
+            try:
+                return float(str(raw).strip().split()[0])
+            except (ValueError, IndexError):
+                pass
+        return None
+
+    gain = _find("replaygain_track_gain")
+    if gain is None:
+        return None
+    peak = _find("replaygain_track_peak")
+    return gain, peak
+
+
+def backfill_audio(songs_dir: Path, *, overwrite: bool = False) -> int:
+    """Probe each song's primary audio and populate audio + replaygain sections.
+
+    For each song folder: probes the full mix with ffprobe (audio section) and
+    reads any existing ReplayGain tags from it (replaygain section). Skips
+    sections that are already present unless overwrite=True. Returns the count
+    of songs whose fix-metadata.json was updated.
+
+    mutagen is used for the ReplayGain read; if it is not installed that
+    section is silently skipped and only the audio probe is written.
     """
     from utils import audio_lengths
 
@@ -198,11 +286,25 @@ def backfill_audio(songs_dir: Path, *, overwrite: bool = False) -> int:
     for song_dir in sorted(
         p for p in songs_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
     ):
-        if not overwrite and "audio" in read(song_dir):
+        existing = read(song_dir)
+        needs_audio = overwrite or "audio" not in existing
+        needs_replaygain = overwrite or "replaygain" not in existing
+        if not needs_audio and not needs_replaygain:
             continue
+
         mix = audio_lengths.find_full_mix(song_dir)
         if mix is None:
             continue
-        if set_audio(song_dir, mix):
+
+        changed = False
+        if needs_audio:
+            changed = set_audio(song_dir, mix) or changed
+        if needs_replaygain:
+            rg = _read_replaygain_tags(mix)
+            if rg is not None:
+                gain_db, peak = rg
+                changed = set_replaygain(song_dir, gain_db, peak) or changed
+
+        if changed:
             updated += 1
     return updated
