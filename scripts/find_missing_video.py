@@ -42,7 +42,7 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-VIDEO_EXTENSIONS = frozenset({".mp4", ".webm", ".mkv", ".avi", ".mov", ".mpg", ".mpeg"})
+VIDEO_EXTENSIONS = frozenset({".flv", ".mp4", ".webm", ".mkv", ".avi", ".mov", ".mpg", ".mpeg"})
 # utf-8-sig decodes UTF-8 with or without a leading BOM and drops it. Charts
 # are always written back as plain UTF-8, so a BOM never survives an edit.
 TAG_ENCODINGS = ("utf-8-sig", "cp1252")
