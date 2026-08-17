@@ -100,17 +100,26 @@ def probe_has_video_stream(path: Path) -> bool:
 
 
 def video_id_from_marker(song_dir: Path) -> str | None:
-    """Read the v= source id from the folder's .usdb marker, if present."""
+    """Read the video source id from the folder's .usdb marker, if present.
+
+    Prefers v= (video-specific id); falls back to a= (audio/combined id)
+    for entries where the video and audio share one source.
+    """
     for marker in sorted(song_dir.glob("*.usdb")):
         try:
             payload = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
+        sources: dict[str, str] = {}
         for token in str(payload.get("meta_tags", "")).split(","):
             if "=" in token:
                 key, _, value = token.partition("=")
-                if key.strip() == "v" and value.strip():
-                    return value.strip()
+                key, value = key.strip(), value.strip()
+                if key in ("v", "a") and value:
+                    sources[key] = value
+        result = sources.get("v") or sources.get("a")
+        if result:
+            return result
     return None
 
 
