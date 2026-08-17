@@ -26,6 +26,12 @@ resolve_duplicate_songs.py and find_missing_video.py).
     uv run scripts/fix_missing_video.py "38 Special - Hold On Loosely" mh4CgxITgbE
     uv run scripts/fix_missing_video.py "./songs/38 Special - Hold On Loosely/" mh4CgxITgbE --write
 
+Playlist and radio URLs work fine -- the list=/start_radio= parameters are
+ignored and only the v= id is used. Quote the URL in PowerShell or the shell
+will treat & as a command separator:
+
+    uv run scripts/fix_missing_video.py 7456 "https://www.youtube.com/watch?v=mh4CgxITgbE&list=RD..."
+
 The id was the only accepted form to begin with, which was awkward: the
 find_missing_* scripts that tell you a video is missing print bare folder
 names, so using their output meant opening the .usdb marker to look the
